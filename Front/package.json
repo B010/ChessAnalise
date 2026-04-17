@@ -1,0 +1,12 @@
+{
+  "scripts": {
+    "dev": "npm --prefix chess run dev",
+    "start": "npm --prefix chess run dev",
+    "build": "npm --prefix chess run build",
+    "lint": "npm --prefix chess run lint",
+    "preview": "npm --prefix chess run preview"
+  },
+  "dependencies": {
+    "chadcn": "^0.0.7"
+  }
+}
