@@ -1,8 +1,8 @@
 {
   "version": 2,
-  "dgSpecHash": "SF5Kysce5SA=",
+  "dgSpecHash": "6IbAxWGxBS0=",
   "success": true,
-  "projectFilePath": "D:\\projetos\\ChessAnalise\\Api\\ApiChess\\ApiChess.csproj",
+  "projectFilePath": "d:\\projetos\\ChessAnalise\\Api\\ApiChess\\ApiChess.csproj",
   "expectedPackageFiles": [
     "C:\\Users\\Buggy\\.nuget\\packages\\microsoft.aspnetcore.openapi\\9.0.7\\microsoft.aspnetcore.openapi.9.0.7.nupkg.sha512",
     "C:\\Users\\Buggy\\.nuget\\packages\\microsoft.openapi\\1.6.17\\microsoft.openapi.1.6.17.nupkg.sha512"

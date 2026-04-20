@@ -1,1 +1,43 @@
-node_modules
+# -----------------------------
+# Node / Frontend
+# -----------------------------
+node_modules/
+Front/**/node_modules/
+
+# Build outputs
+Front/chess/dist/
+Front/chess/.vite/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# -----------------------------
+# .NET / Visual Studio
+# -----------------------------
+**/bin/
+**/obj/
+
+# User-specific files
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Visual Studio / Rider / VS Code
+.vs/
+.idea/
+.vscode/
+
+# -----------------------------
+# OS / Misc
+# -----------------------------
+.DS_Store
+Thumbs.db
