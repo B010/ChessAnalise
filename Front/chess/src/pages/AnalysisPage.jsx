@@ -72,7 +72,10 @@ export function AnalysisPage() {
           <div>
             <div className="eyebrow">Analise completa</div>
             <h1 className="analysis-title">{headerText}</h1>
-            <p className="hero-description">Painel com sinais de abertura, cor, precisao e risco de decisao.</p>
+            <p className="hero-description">
+              Painel com sinais de abertura, cor, precisao e risco de decisao.
+              {result?.dataWindowMonths ? ` Base de ${result.dataWindowMonths} meses recentes (${result.sampleSize ?? 0} partidas).` : ''}
+            </p>
           </div>
           <Link to="/">
             <Button variant="secondary">Voltar e trocar jogador</Button>
@@ -134,8 +137,25 @@ export function AnalysisPage() {
 
             <Card>
               <CardHeader>
+                <CardTitle>Onde esta acertando</CardTitle>
+                <CardDescription>Seus principais sinais de acerto na janela recente.</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <ul className="analysis-list analysis-list--success">
+                  {(result.successSummary?.highlights ?? []).map((item) => (
+                    <li key={`success-${item}`}>
+                      <span>{item}</span>
+                    </li>
+                  ))}
+                  {!result.successSummary?.highlights?.length && <li>Sem dados suficientes.</li>}
+                </ul>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
                 <CardTitle>Melhores aberturas</CardTitle>
-                <CardDescription>Ranking por taxa de pontos nas partidas recentes.</CardDescription>
+                <CardDescription>Ranking por familia de abertura (linhas e variantes agrupadas).</CardDescription>
               </CardHeader>
               <CardContent>
                 <ul className="analysis-list">
@@ -152,15 +172,17 @@ export function AnalysisPage() {
 
             <Card>
               <CardHeader>
-                <CardTitle>Piores aberturas</CardTitle>
-                <CardDescription>Onde voce mais perde pontos hoje.</CardDescription>
+                <CardTitle>Familias onde mais sofre</CardTitle>
+                <CardDescription>Indice ponderado por volume de jogos para evitar distorcao de amostra pequena.</CardDescription>
               </CardHeader>
               <CardContent>
                 <ul className="analysis-list">
                   {(result.openings?.worst ?? []).map((item) => (
                     <li key={`worst-${item.name}`}>
                       <span>{item.name}</span>
-                      <strong>{pct(item.scoreRate)} em {item.games} jogos</strong>
+                      <strong>
+                        Indice {pct(item.sufferingIndex)} | Derrotas {item.losses}/{item.games}
+                      </strong>
                     </li>
                   ))}
                   {!result.openings?.worst?.length && <li>Sem dados suficientes.</li>}
@@ -200,6 +222,24 @@ export function AnalysisPage() {
                     </li>
                   ))}
                   {!result.phasePressure?.length && <li>Sem dados suficientes.</li>}
+                </ul>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle>Fases onde mais pontua</CardTitle>
+                <CardDescription>Aproveitamento por fase da partida.</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <ul className="analysis-list">
+                  {(result.phasePerformance ?? []).map((item) => (
+                    <li key={`phase-performance-${item.phase}`}>
+                      <span>{item.phase}</span>
+                      <strong>{pct(item.scoreRate)} em {item.games} jogos</strong>
+                    </li>
+                  ))}
+                  {!result.phasePerformance?.length && <li>Sem dados suficientes.</li>}
                 </ul>
               </CardContent>
             </Card>

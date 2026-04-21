@@ -325,6 +325,12 @@ input {
   text-align: right;
 }
 
+.analysis-list--success li {
+  border-color: rgba(52, 211, 153, 0.35);
+  background: rgba(16, 185, 129, 0.08);
+  color: #d1fae5;
+}
+
 .analysis-ai-card {
   grid-column: span 2;
 }

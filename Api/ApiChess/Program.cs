@@ -142,7 +142,9 @@ app.MapGet("/api/players/{username}/analysis", async (
         var openings = BuildOpenings(games);
         var piecePressure = BuildPiecePressure(games);
         var phasePressure = BuildPhasePressure(games);
+        var phasePerformance = BuildPhasePerformance(games);
         var accuracy = BuildAccuracy(games);
+        var successSummary = BuildSuccessSummary(byColor, openings, piecePressure, phasePerformance, accuracy);
 
         var aiTip = await BuildAiTipAsync(
             httpClientFactory,
@@ -154,6 +156,7 @@ app.MapGet("/api/players/{username}/analysis", async (
             byColor,
             piecePressure,
             phasePressure,
+            successSummary,
             accuracy,
             cancellationToken);
 
@@ -167,8 +170,11 @@ app.MapGet("/api/players/{username}/analysis", async (
             Openings: openings,
             PiecePressure: piecePressure,
             PhasePressure: phasePressure,
+            PhasePerformance: phasePerformance,
+            SuccessSummary: successSummary,
             AiTip: aiTip,
             SampleSize: games.Count,
+            DataWindowMonths: 3,
             GeneratedAtUnix: DateTimeOffset.UtcNow.ToUnixTimeSeconds());
 
         return Results.Ok(response);
@@ -214,7 +220,7 @@ static async Task<List<ParsedGame>> FetchRecentGamesAsync(HttpClient client, str
         .EnumerateArray()
         .Select(x => x.GetString())
         .Where(x => !string.IsNullOrWhiteSpace(x))
-        .TakeLast(4)
+        .TakeLast(3)
         .ToArray();
 
     var parsedGames = new List<ParsedGame>();
@@ -413,7 +419,7 @@ static ColorStatsDto BuildColorStats(IEnumerable<ParsedGame> games)
 static OpeningSummaryDto BuildOpenings(IEnumerable<ParsedGame> games)
 {
     var openingStats = games
-        .GroupBy(x => x.Opening)
+        .GroupBy(x => NormalizeOpeningFamily(x.Opening))
         .Select(group =>
         {
             var wins = group.Count(x => x.Outcome == GameOutcome.Win);
@@ -423,20 +429,72 @@ static OpeningSummaryDto BuildOpenings(IEnumerable<ParsedGame> games)
             var scoreRate = total > 0
                 ? Math.Round(((wins + (draws * 0.5)) / total) * 100, 1)
                 : 0;
+            var lossRate = total > 0
+                ? Math.Round((double)losses / total * 100, 1)
+                : 0;
 
-            return new OpeningStatDto(group.Key, total, wins, draws, losses, scoreRate);
+            // Penaliza amostras pequenas para evitar supervalorizar 1-2 derrotas.
+            var confidenceWeight = Math.Min(1d, total / 8d);
+            var sufferingIndex = Math.Round(lossRate * confidenceWeight, 1);
+
+            return new OpeningStatDto(group.Key, total, wins, draws, losses, scoreRate, lossRate, sufferingIndex);
         })
         .Where(x => x.Games >= 2)
         .ToList();
 
-    var best = openingStats
+    var bestCandidates = openingStats.Where(x => x.Games >= 6).ToList();
+    if (bestCandidates.Count == 0)
+    {
+        bestCandidates = openingStats.Where(x => x.Games >= 4).ToList();
+    }
+    if (bestCandidates.Count == 0)
+    {
+        bestCandidates = openingStats;
+    }
+
+    var best = bestCandidates
         .OrderByDescending(x => x.ScoreRate)
         .ThenByDescending(x => x.Games)
         .Take(4)
         .ToList();
 
-    var worst = openingStats
-        .OrderBy(x => x.ScoreRate)
+    var bestNames = best.Select(x => x.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+    var worstCandidates = openingStats
+        .Where(x => x.Games >= 6)
+        .Where(x => x.Losses > 0)
+        .ToList();
+
+    if (worstCandidates.Count == 0)
+    {
+        worstCandidates = openingStats
+            .Where(x => x.Games >= 4)
+            .Where(x => x.Losses > 0)
+            .ToList();
+    }
+
+    if (worstCandidates.Count == 0)
+    {
+        worstCandidates = openingStats.Where(x => x.Losses > 0).ToList();
+    }
+
+    if (worstCandidates.Count == 0)
+    {
+        worstCandidates = openingStats;
+    }
+
+    var worstWithoutBest = worstCandidates
+        .Where(x => !bestNames.Contains(x.Name))
+        .ToList();
+
+    if (worstWithoutBest.Count >= 2)
+    {
+        worstCandidates = worstWithoutBest;
+    }
+
+    var worst = worstCandidates
+        .OrderByDescending(x => x.SufferingIndex)
+        .ThenByDescending(x => x.LossRate)
         .ThenByDescending(x => x.Games)
         .Take(4)
         .ToList();
@@ -483,6 +541,81 @@ static List<PhasePressureDto> BuildPhasePressure(IEnumerable<ParsedGame> games)
         .ToList();
 }
 
+static List<PhasePerformanceDto> BuildPhasePerformance(IEnumerable<ParsedGame> games)
+{
+    return games
+        .GroupBy(g => GetPhaseFromPlyCount(g.PlyCount))
+        .Select(group =>
+        {
+            var wins = group.Count(x => x.Outcome == GameOutcome.Win);
+            var draws = group.Count(x => x.Outcome == GameOutcome.Draw);
+            var losses = group.Count(x => x.Outcome == GameOutcome.Loss);
+            var total = group.Count();
+            var scoreRate = total > 0
+                ? Math.Round(((wins + (draws * 0.5)) / total) * 100, 1)
+                : 0;
+
+            return new PhasePerformanceDto(group.Key, total, wins, draws, losses, scoreRate);
+        })
+        .OrderByDescending(x => x.ScoreRate)
+        .ThenByDescending(x => x.Games)
+        .ToList();
+}
+
+static SuccessSummaryDto BuildSuccessSummary(
+    ColorSplitDto byColor,
+    OpeningSummaryDto openings,
+    IReadOnlyList<PiecePressureDto> piecePressure,
+    IReadOnlyList<PhasePerformanceDto> phasePerformance,
+    AccuracySummaryDto accuracy)
+{
+    var bestColor = byColor.White.WinRate >= byColor.Black.WinRate ? "Brancas" : "Pretas";
+    var bestOpening = openings.Best.FirstOrDefault();
+    var safestPiece = piecePressure.OrderBy(x => x.RiskRate).FirstOrDefault();
+    var strongestPhase = phasePerformance.FirstOrDefault();
+
+    string? bestAccuracySide = null;
+    if (accuracy.WhiteAverage is not null || accuracy.BlackAverage is not null)
+    {
+        bestAccuracySide = (accuracy.WhiteAverage ?? double.MinValue) >= (accuracy.BlackAverage ?? double.MinValue)
+            ? "Brancas"
+            : "Pretas";
+    }
+
+    var highlights = new List<string>
+    {
+        $"Melhor desempenho por cor: {bestColor}."
+    };
+
+    if (bestOpening is not null)
+    {
+        highlights.Add($"Abertura mais eficiente: {bestOpening.Name} ({bestOpening.ScoreRate}% em {bestOpening.Games} jogos)." );
+    }
+
+    if (safestPiece is not null)
+    {
+        highlights.Add($"Peca mais segura nas decisoes recentes: {safestPiece.Piece}." );
+    }
+
+    if (strongestPhase is not null)
+    {
+        highlights.Add($"Fase mais forte: {strongestPhase.Phase} ({strongestPhase.ScoreRate}% de aproveitamento)." );
+    }
+
+    if (bestAccuracySide is not null)
+    {
+        highlights.Add($"Melhor precisao media com: {bestAccuracySide}." );
+    }
+
+    return new SuccessSummaryDto(
+        BestColor: bestColor,
+        BestOpening: bestOpening,
+        SafestPiece: safestPiece,
+        StrongestPhase: strongestPhase,
+        BestAccuracySide: bestAccuracySide,
+        Highlights: highlights.Take(5).ToArray());
+}
+
 static AccuracySummaryDto BuildAccuracy(IEnumerable<ParsedGame> games)
 {
     var list = games.ToList();
@@ -507,10 +640,11 @@ static async Task<string> BuildAiTipAsync(
     ColorSplitDto byColor,
     IReadOnlyList<PiecePressureDto> piecePressure,
     IReadOnlyList<PhasePressureDto> phasePressure,
+    SuccessSummaryDto successSummary,
     AccuracySummaryDto accuracy,
     CancellationToken cancellationToken)
 {
-    var fallback = BuildRuleBasedTip(profileStats, openings, byColor, piecePressure, phasePressure, accuracy, sampleSize);
+    var fallback = BuildRuleBasedTip(profileStats, openings, byColor, piecePressure, phasePressure, successSummary, accuracy, sampleSize);
     var apiKey = configuration["OPENAI_API_KEY"];
 
     if (string.IsNullOrWhiteSpace(apiKey))
@@ -523,7 +657,7 @@ static async Task<string> BuildAiTipAsync(
         var http = httpClientFactory.CreateClient();
         http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiKey);
 
-        var prompt = BuildAiPrompt(username, sampleSize, profileStats, openings, byColor, piecePressure, phasePressure, accuracy);
+        var prompt = BuildAiPrompt(username, sampleSize, profileStats, openings, byColor, piecePressure, phasePressure, successSummary, accuracy);
         var payload = new
         {
             model = "gpt-4o-mini",
@@ -571,6 +705,7 @@ static string BuildAiPrompt(
     ColorSplitDto byColor,
     IReadOnlyList<PiecePressureDto> piecePressure,
     IReadOnlyList<PhasePressureDto> phasePressure,
+    SuccessSummaryDto successSummary,
     AccuracySummaryDto accuracy)
 {
     var bestOpening = openings.Best.FirstOrDefault();
@@ -585,11 +720,13 @@ static string BuildAiPrompt(
     Brancas win rate: {byColor.White.WinRate}% | Pretas win rate: {byColor.Black.WinRate}%
     Melhor abertura: {bestOpening?.Name} ({bestOpening?.ScoreRate}%)
     Pior abertura: {worstOpening?.Name} ({worstOpening?.ScoreRate}%)
+    Cor de melhor desempenho: {successSummary.BestColor}
+    Fase mais forte: {successSummary.StrongestPhase?.Phase}
     Peca sob pressao: {riskiestPiece?.Piece} ({riskiestPiece?.RiskRate}%)
     Fase critica: {worstPhase?.Phase}
     Precisao media: {accuracy.OverallAverage}%
 
-    Gere uma dica pratica em ate 3 frases sobre plano de treino para as proximas semanas.
+    Gere uma dica pratica em ate 3 frases equilibrando pontos fortes e pontos de evolucao para as proximas semanas.
     """;
 }
 
@@ -599,10 +736,16 @@ static string BuildRuleBasedTip(
     ColorSplitDto byColor,
     IReadOnlyList<PiecePressureDto> piecePressure,
     IReadOnlyList<PhasePressureDto> phasePressure,
+    SuccessSummaryDto successSummary,
     AccuracySummaryDto accuracy,
     int sampleSize)
 {
     var tips = new List<string>();
+
+    if (successSummary.BestOpening is not null)
+    {
+        tips.Add($"Voce esta acertando bem na abertura {successSummary.BestOpening.Name}, mantendo {successSummary.BestOpening.ScoreRate}% de aproveitamento.");
+    }
 
     if (sampleSize < 20)
     {
@@ -765,6 +908,56 @@ static string NormalizeOpeningName(string opening)
     return opening;
 }
 
+static string NormalizeOpeningFamily(string opening)
+{
+    var normalized = opening.Trim();
+    normalized = Regex.Replace(normalized, "\\s+", " ");
+    normalized = Regex.Replace(normalized, "\\s+\\d.*$", string.Empty);
+
+    var lower = normalized.ToLowerInvariant();
+    var directFamilies = new (string Pattern, string Family)[]
+    {
+        ("petrov|petroff", "Petrov Defense"),
+        ("four knights", "Four Knights Game"),
+        ("sicilian defense", "Sicilian Defense"),
+        ("french defense", "French Defense"),
+        ("caro[- ]kann", "Caro-Kann Defense"),
+        ("ruy lopez", "Ruy Lopez"),
+        ("italian game", "Italian Game"),
+        ("queens pawn opening", "Queen's Pawn Opening"),
+        ("queens gambit", "Queen's Gambit"),
+        ("kings indian defense", "King's Indian Defense"),
+        ("nimzo[- ]indian defense", "Nimzo-Indian Defense"),
+        ("english opening", "English Opening"),
+        ("scandinavian defense", "Scandinavian Defense"),
+        ("pirc defense", "Pirc Defense"),
+        ("bishop.?s opening", "Bishop's Opening")
+    };
+
+    foreach (var family in directFamilies)
+    {
+        if (Regex.IsMatch(lower, family.Pattern, RegexOptions.IgnoreCase))
+        {
+            return family.Family;
+        }
+    }
+
+    var markers = new[] { " Defense", " Game", " Gambit", " Opening", " System", " Attack" };
+    foreach (var marker in markers)
+    {
+        var index = normalized.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+        if (index >= 0)
+        {
+            return normalized[..(index + marker.Length)].Trim();
+        }
+    }
+
+    var words = normalized.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+    return words.Length <= 4
+        ? normalized
+        : string.Join(' ', words.Take(4));
+}
+
 static double? AvgOrNull(List<double> values)
 {
     return values.Count > 0 ? Math.Round(values.Average(), 1) : null;
@@ -864,8 +1057,11 @@ public sealed record PlayerDeepAnalysisResponse(
     OpeningSummaryDto Openings,
     IReadOnlyList<PiecePressureDto> PiecePressure,
     IReadOnlyList<PhasePressureDto> PhasePressure,
+    IReadOnlyList<PhasePerformanceDto> PhasePerformance,
+    SuccessSummaryDto SuccessSummary,
     string AiTip,
     int SampleSize,
+    int DataWindowMonths,
     long GeneratedAtUnix);
 
 public sealed record PlayerProfileDto(
@@ -902,10 +1098,28 @@ public sealed record ColorStatsDto(int Wins, int Draws, int Losses, int TotalGam
 
 public sealed record OpeningSummaryDto(IReadOnlyList<OpeningStatDto> Best, IReadOnlyList<OpeningStatDto> Worst);
 
-public sealed record OpeningStatDto(string Name, int Games, int Wins, int Draws, int Losses, double ScoreRate);
+public sealed record OpeningStatDto(
+    string Name,
+    int Games,
+    int Wins,
+    int Draws,
+    int Losses,
+    double ScoreRate,
+    double LossRate,
+    double SufferingIndex);
 
 public sealed record PiecePressureDto(string Piece, int TotalMoves, int MovesInLosses, double RiskRate);
 
 public sealed record PhasePressureDto(string Phase, int Losses);
+
+public sealed record PhasePerformanceDto(string Phase, int Games, int Wins, int Draws, int Losses, double ScoreRate);
+
+public sealed record SuccessSummaryDto(
+    string BestColor,
+    OpeningStatDto? BestOpening,
+    PiecePressureDto? SafestPiece,
+    PhasePerformanceDto? StrongestPhase,
+    string? BestAccuracySide,
+    IReadOnlyList<string> Highlights);
 
 public sealed record AccuracySummaryDto(double? OverallAverage, double? WhiteAverage, double? BlackAverage, int GamesWithAccuracy);
