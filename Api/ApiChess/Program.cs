@@ -1,14 +1,17 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using Microsoft.Extensions.Caching.Memory;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddOpenApi();
+builder.Services.AddMemoryCache();
 builder.Services.AddHttpClient("ChessCom", client =>
 {
     client.BaseAddress = new Uri("https://api.chess.com/pub/");
     client.DefaultRequestHeaders.UserAgent.ParseAdd("ChessAnalise/1.0");
+    client.Timeout = TimeSpan.FromSeconds(20);
 });
 
 builder.Services.AddCors(options =>
@@ -54,7 +57,12 @@ app.MapGet("/api/players/{username}", async (string username, IHttpClientFactory
         var client = httpClientFactory.CreateClient("ChessCom");
         var escapedUsername = Uri.EscapeDataString(normalizedUsername);
 
-        var profileResponse = await client.GetAsync($"player/{escapedUsername}", cancellationToken);
+        var profileResponse = await GetWithRetryAsync(client, $"player/{escapedUsername}", cancellationToken);
+        if (profileResponse is null)
+        {
+            return Results.Problem("Nao foi possivel consultar o perfil no Chess.com.", statusCode: StatusCodes.Status502BadGateway);
+        }
+
         if (profileResponse.StatusCode == System.Net.HttpStatusCode.NotFound)
         {
             return Results.NotFound(new { message = "Jogador nao encontrado no Chess.com." });
@@ -68,9 +76,9 @@ app.MapGet("/api/players/{username}", async (string username, IHttpClientFactory
         await using var profileStream = await profileResponse.Content.ReadAsStreamAsync(cancellationToken);
         using var profileJson = await JsonDocument.ParseAsync(profileStream, cancellationToken: cancellationToken);
 
-        var statsResponse = await client.GetAsync($"player/{escapedUsername}/stats", cancellationToken);
+        var statsResponse = await GetWithRetryAsync(client, $"player/{escapedUsername}/stats", cancellationToken);
         JsonDocument? statsJson = null;
-        if (statsResponse.IsSuccessStatusCode)
+        if (statsResponse is not null && statsResponse.IsSuccessStatusCode)
         {
             await using var statsStream = await statsResponse.Content.ReadAsStreamAsync(cancellationToken);
             statsJson = await JsonDocument.ParseAsync(statsStream, cancellationToken: cancellationToken);
@@ -97,7 +105,9 @@ app.MapGet("/api/players/{username}", async (string username, IHttpClientFactory
 
 app.MapGet("/api/players/{username}/analysis", async (
     string username,
+    string? timeClass,
     IHttpClientFactory httpClientFactory,
+    IMemoryCache memoryCache,
     IConfiguration configuration,
     CancellationToken cancellationToken) =>
 {
@@ -111,8 +121,20 @@ app.MapGet("/api/players/{username}/analysis", async (
 
         var client = httpClientFactory.CreateClient("ChessCom");
         var escapedUsername = Uri.EscapeDataString(normalizedUsername);
+        var normalizedTimeClass = NormalizeTimeClass(timeClass);
+        var cacheKey = $"analysis:{normalizedUsername.ToLowerInvariant()}:{normalizedTimeClass ?? "all"}";
 
-        var profileResponse = await client.GetAsync($"player/{escapedUsername}", cancellationToken);
+        if (memoryCache.TryGetValue(cacheKey, out PlayerDeepAnalysisResponse? cachedResponse) && cachedResponse is not null)
+        {
+            return Results.Ok(cachedResponse);
+        }
+
+        var profileResponse = await GetWithRetryAsync(client, $"player/{escapedUsername}", cancellationToken);
+        if (profileResponse is null)
+        {
+            return Results.Problem("Nao foi possivel consultar o perfil no Chess.com.", statusCode: StatusCodes.Status502BadGateway);
+        }
+
         if (profileResponse.StatusCode == System.Net.HttpStatusCode.NotFound)
         {
             return Results.NotFound(new { message = "Jogador nao encontrado no Chess.com." });
@@ -126,9 +148,9 @@ app.MapGet("/api/players/{username}/analysis", async (
         await using var profileStream = await profileResponse.Content.ReadAsStreamAsync(cancellationToken);
         using var profileJson = await JsonDocument.ParseAsync(profileStream, cancellationToken: cancellationToken);
 
-        var statsResponse = await client.GetAsync($"player/{escapedUsername}/stats", cancellationToken);
+        var statsResponse = await GetWithRetryAsync(client, $"player/{escapedUsername}/stats", cancellationToken);
         JsonDocument? statsJson = null;
-        if (statsResponse.IsSuccessStatusCode)
+        if (statsResponse is not null && statsResponse.IsSuccessStatusCode)
         {
             await using var statsStream = await statsResponse.Content.ReadAsStreamAsync(cancellationToken);
             statsJson = await JsonDocument.ParseAsync(statsStream, cancellationToken: cancellationToken);
@@ -138,25 +160,52 @@ app.MapGet("/api/players/{username}/analysis", async (
         var profileStats = BuildProfileStats(statsJson?.RootElement);
 
         var games = await FetchRecentGamesAsync(client, normalizedUsername, cancellationToken);
-        var byColor = BuildByColor(games);
-        var openings = BuildOpenings(games);
-        var piecePressure = BuildPiecePressure(games);
-        var phasePressure = BuildPhasePressure(games);
-        var phasePerformance = BuildPhasePerformance(games);
-        var accuracy = BuildAccuracy(games);
+        var filteredGames = FilterGamesByTimeClass(games, normalizedTimeClass);
+        if (filteredGames.Count == 0)
+        {
+            return Results.NotFound(new { message = "Sem partidas suficientes para o filtro selecionado." });
+        }
+
+        var byColor = BuildByColor(filteredGames);
+        var openings = BuildOpenings(filteredGames);
+        var piecePressure = BuildPiecePressure(filteredGames);
+        var phasePressure = BuildPhasePressure(filteredGames);
+        var phasePerformance = BuildPhasePerformance(filteredGames);
+        var accuracy = BuildAccuracy(filteredGames);
         var successSummary = BuildSuccessSummary(byColor, openings, piecePressure, phasePerformance, accuracy);
+        var recentGames = BuildRecentGames(filteredGames);
+        var weeklyTrend = BuildWeeklyTrend(filteredGames);
+        var timeClassBreakdown = BuildTimeClassBreakdown(games);
+        var opponentRanges = BuildOpponentRangeSummary(filteredGames);
+        var overallScore = BuildOverallScore(byColor, accuracy, openings, piecePressure);
+        var openingRecommendations = BuildOpeningRecommendations(openings);
+        var monthComparison = BuildMonthComparison(filteredGames);
+        var confidence = BuildConfidenceSummary(filteredGames.Count, openings, normalizedTimeClass);
+        var trainingPlan = BuildSevenDayTrainingPlan(successSummary, openings, piecePressure, phasePressure, accuracy, normalizedTimeClass);
+
+        var themedTips = await BuildThemeTipsAsync(
+            httpClientFactory,
+            configuration,
+            normalizedUsername,
+            filteredGames.Count,
+            openings,
+            phasePressure,
+            piecePressure,
+            successSummary,
+            cancellationToken);
 
         var aiTip = await BuildAiTipAsync(
             httpClientFactory,
             configuration,
             normalizedUsername,
-            games.Count,
+            filteredGames.Count,
             profileStats,
             openings,
             byColor,
             piecePressure,
             phasePressure,
             successSummary,
+            recentGames,
             accuracy,
             cancellationToken);
 
@@ -172,10 +221,23 @@ app.MapGet("/api/players/{username}/analysis", async (
             PhasePressure: phasePressure,
             PhasePerformance: phasePerformance,
             SuccessSummary: successSummary,
+            RecentGames: recentGames,
+            OverallScore: overallScore,
+            WeeklyTrend: weeklyTrend,
+            TimeClassBreakdown: timeClassBreakdown,
+            OpponentRanges: opponentRanges,
+            OpeningRecommendations: openingRecommendations,
+            TrainingPlan: trainingPlan,
+            MonthComparison: monthComparison,
+            ThemedTips: themedTips,
+            Confidence: confidence,
             AiTip: aiTip,
-            SampleSize: games.Count,
+            SampleSize: filteredGames.Count,
+            TimeClassFilter: normalizedTimeClass,
             DataWindowMonths: 3,
             GeneratedAtUnix: DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+
+        memoryCache.Set(cacheKey, response, TimeSpan.FromMinutes(10));
 
         return Results.Ok(response);
     }
@@ -192,6 +254,73 @@ app.MapGet("/api/players/{username}/analysis", async (
 })
 .WithName("GetPlayerDeepAnalysis");
 
+app.MapGet("/api/players/{username}/game-analysis", async (
+    string username,
+    string gameUrl,
+    IHttpClientFactory httpClientFactory,
+    IConfiguration configuration,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        var normalizedUsername = NormalizeUsername(username);
+        if (normalizedUsername is null)
+        {
+            return Results.BadRequest(new { message = "Informe um nickname valido." });
+        }
+
+        if (string.IsNullOrWhiteSpace(gameUrl))
+        {
+            return Results.BadRequest(new { message = "Informe a URL da partida para analise." });
+        }
+
+        var client = httpClientFactory.CreateClient("ChessCom");
+        var games = await FetchRecentGamesAsync(client, normalizedUsername, cancellationToken);
+        var target = FindGameByUrl(games, gameUrl);
+
+        if (target is null)
+        {
+            return Results.NotFound(new { message = "Partida nao encontrada nos ultimos 3 meses." });
+        }
+
+        var openings = BuildOpenings(games);
+        var piecePressure = BuildPiecePressure(games);
+        var phasePressure = BuildPhasePressure(games);
+        var overview = BuildGameOverview(target);
+        var strengths = BuildGameStrengths(target, openings);
+        var mistakes = BuildGameMistakes(target, openings, phasePressure, piecePressure);
+        var improvements = BuildGameImprovements(target, openings, phasePressure, piecePressure);
+
+        var aiComment = await BuildGameAiCommentAsync(
+            httpClientFactory,
+            configuration,
+            normalizedUsername,
+            overview,
+            strengths,
+            mistakes,
+            improvements,
+            cancellationToken);
+
+        return Results.Ok(new GameAnalysisResponse(
+            Overview: overview,
+            Strengths: strengths,
+            Mistakes: mistakes,
+            Improvements: improvements,
+            AiComment: aiComment));
+    }
+    catch (OperationCanceledException)
+    {
+        return cancellationToken.IsCancellationRequested
+            ? Results.StatusCode(499)
+            : Results.StatusCode(StatusCodes.Status504GatewayTimeout);
+    }
+    catch (HttpRequestException)
+    {
+        return Results.Problem("Falha de rede ao consultar o Chess.com.", statusCode: StatusCodes.Status502BadGateway);
+    }
+})
+.WithName("GetGameAnalysis");
+
 app.Run();
 
 static string? NormalizeUsername(string username)
@@ -200,11 +329,73 @@ static string? NormalizeUsername(string username)
     return string.IsNullOrWhiteSpace(normalized) ? null : normalized;
 }
 
+static string? NormalizeTimeClass(string? timeClass)
+{
+    if (string.IsNullOrWhiteSpace(timeClass))
+    {
+        return null;
+    }
+
+    var normalized = timeClass.Trim().ToLowerInvariant();
+    return normalized switch
+    {
+        "rapid" or "blitz" or "bullet" or "daily" => normalized,
+        "all" => null,
+        _ => null
+    };
+}
+
+static List<ParsedGame> FilterGamesByTimeClass(IEnumerable<ParsedGame> games, string? timeClass)
+{
+    return string.IsNullOrWhiteSpace(timeClass)
+        ? games.ToList()
+        : games.Where(g => g.TimeClass.Equals(timeClass, StringComparison.OrdinalIgnoreCase)).ToList();
+}
+
+static ParsedGame? FindGameByUrl(IEnumerable<ParsedGame> games, string gameUrl)
+{
+    var normalized = gameUrl.Trim();
+    return games.FirstOrDefault(g => !string.IsNullOrWhiteSpace(g.GameUrl) &&
+        string.Equals(g.GameUrl.Trim(), normalized, StringComparison.OrdinalIgnoreCase));
+}
+
+static async Task<HttpResponseMessage?> GetWithRetryAsync(HttpClient client, string uri, CancellationToken cancellationToken)
+{
+    const int maxAttempts = 3;
+    for (var attempt = 1; attempt <= maxAttempts; attempt++)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        try
+        {
+            var response = await client.GetAsync(uri, cancellationToken);
+            if ((int)response.StatusCode >= 500 || response.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
+            {
+                if (attempt == maxAttempts)
+                {
+                    return response;
+                }
+
+                await Task.Delay(TimeSpan.FromMilliseconds(250 * attempt), cancellationToken);
+                continue;
+            }
+
+            return response;
+        }
+        catch (HttpRequestException) when (attempt < maxAttempts)
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(250 * attempt), cancellationToken);
+        }
+    }
+
+    return null;
+}
+
 static async Task<List<ParsedGame>> FetchRecentGamesAsync(HttpClient client, string username, CancellationToken cancellationToken)
 {
     var escapedUsername = Uri.EscapeDataString(username);
-    var archivesResponse = await client.GetAsync($"player/{escapedUsername}/games/archives", cancellationToken);
-    if (!archivesResponse.IsSuccessStatusCode)
+    var archivesResponse = await GetWithRetryAsync(client, $"player/{escapedUsername}/games/archives", cancellationToken);
+    if (archivesResponse is null || !archivesResponse.IsSuccessStatusCode)
     {
         return [];
     }
@@ -219,6 +410,7 @@ static async Task<List<ParsedGame>> FetchRecentGamesAsync(HttpClient client, str
     var archiveUrls = archivesElement
         .EnumerateArray()
         .Select(x => x.GetString())
+        .OfType<string>()
         .Where(x => !string.IsNullOrWhiteSpace(x))
         .TakeLast(3)
         .ToArray();
@@ -226,8 +418,8 @@ static async Task<List<ParsedGame>> FetchRecentGamesAsync(HttpClient client, str
     var parsedGames = new List<ParsedGame>();
     foreach (var archiveUrl in archiveUrls)
     {
-        var gamesResponse = await client.GetAsync(archiveUrl, cancellationToken);
-        if (!gamesResponse.IsSuccessStatusCode)
+        var gamesResponse = await GetWithRetryAsync(client, archiveUrl, cancellationToken);
+        if (gamesResponse is null || !gamesResponse.IsSuccessStatusCode)
         {
             continue;
         }
@@ -279,6 +471,12 @@ static bool TryParseGame(JsonElement game, string username, out ParsedGame parse
     var side = isWhite ? "white" : "black";
     var resultCode = GetNestedString(game, side, "result") ?? string.Empty;
     var outcome = MapOutcome(resultCode);
+    var opponentUsername = isWhite ? blackUsername : whiteUsername;
+    var timeClass = GetString(game, "time_class") ?? "desconhecido";
+    var timeControl = GetString(game, "time_control");
+    var gameUrl = GetString(game, "url");
+    var playerRating = GetNestedInt(game, side, "rating");
+    var opponentRating = GetNestedInt(game, isWhite ? "black" : "white", "rating");
 
     var opening = NormalizeOpeningName(
         GetString(game, "eco")
@@ -321,6 +519,12 @@ static bool TryParseGame(JsonElement game, string username, out ParsedGame parse
         Outcome: outcome,
         Opening: opening,
         PlayerResultCode: resultCode,
+        OpponentUsername: opponentUsername,
+        TimeClass: timeClass,
+        TimeControl: timeControl,
+        GameUrl: gameUrl,
+        PlayerRating: playerRating,
+        OpponentRating: opponentRating,
         PlayerAccuracy: accuracy,
         PlayerPieceMoves: pieceCounters,
         PlyCount: sanMoves.Count,
@@ -541,6 +745,36 @@ static List<PhasePressureDto> BuildPhasePressure(IEnumerable<ParsedGame> games)
         .ToList();
 }
 
+static IReadOnlyList<RecentGameDto> BuildRecentGames(IEnumerable<ParsedGame> games)
+{
+    return games
+        .OrderByDescending(g => g.EndTimeUnix)
+        .Take(5)
+        .Select(g => new RecentGameDto(
+            PlayedAtUnix: g.EndTimeUnix,
+            Opponent: g.OpponentUsername ?? "Desconhecido",
+            Color: g.IsWhite ? "Brancas" : "Pretas",
+            Result: MapOutcomeLabel(g.Outcome),
+            ResultCode: g.PlayerResultCode,
+            TimeClass: g.TimeClass,
+            OpeningFamily: NormalizeOpeningFamily(g.Opening),
+            Opening: g.Opening,
+            Accuracy: g.PlayerAccuracy,
+            FullMoves: Math.Max(1, (int)Math.Ceiling(g.PlyCount / 2d)),
+            GameUrl: g.GameUrl))
+        .ToList();
+}
+
+static string MapOutcomeLabel(GameOutcome outcome)
+{
+    return outcome switch
+    {
+        GameOutcome.Win => "Vitoria",
+        GameOutcome.Draw => "Empate",
+        _ => "Derrota"
+    };
+}
+
 static List<PhasePerformanceDto> BuildPhasePerformance(IEnumerable<ParsedGame> games)
 {
     return games
@@ -630,6 +864,477 @@ static AccuracySummaryDto BuildAccuracy(IEnumerable<ParsedGame> games)
         GamesWithAccuracy: all.Count);
 }
 
+static OverallScoreDto BuildOverallScore(
+    ColorSplitDto byColor,
+    AccuracySummaryDto accuracy,
+    OpeningSummaryDto openings,
+    IReadOnlyList<PiecePressureDto> piecePressure)
+{
+    var totalGames = byColor.White.TotalGames + byColor.Black.TotalGames;
+    var wins = byColor.White.Wins + byColor.Black.Wins;
+    var draws = byColor.White.Draws + byColor.Black.Draws;
+    var scoreRate = totalGames > 0 ? ((wins + (draws * 0.5)) / totalGames) * 100 : 0;
+    var accuracyRate = accuracy.OverallAverage ?? 75;
+    var riskPenalty = piecePressure.FirstOrDefault()?.RiskRate ?? 15;
+    var openingBalance = openings.Best.FirstOrDefault()?.ScoreRate ?? 60;
+
+    var value = Math.Round((scoreRate * 0.4) + (accuracyRate * 0.35) + ((100 - riskPenalty) * 0.15) + (openingBalance * 0.10), 1);
+    var level = value switch
+    {
+        >= 85 => "Excelente",
+        >= 72 => "Bom",
+        >= 60 => "Em evolucao",
+        _ => "Instavel"
+    };
+
+    return new OverallScoreDto(value, level, "Indice combinado entre resultado, precisao e consistencia.");
+}
+
+static IReadOnlyList<WeeklyTrendDto> BuildWeeklyTrend(IEnumerable<ParsedGame> games)
+{
+    return games
+        .GroupBy(g => GetWeekStartUnix(g.EndTimeUnix))
+        .OrderBy(group => group.Key)
+        .TakeLast(12)
+        .Select(group =>
+        {
+            var wins = group.Count(x => x.Outcome == GameOutcome.Win);
+            var draws = group.Count(x => x.Outcome == GameOutcome.Draw);
+            var losses = group.Count(x => x.Outcome == GameOutcome.Loss);
+            var total = group.Count();
+            var scoreRate = total > 0
+                ? Math.Round(((wins + (draws * 0.5)) / total) * 100, 1)
+                : 0;
+            var avgAccuracy = AvgOrNull(group.Where(x => x.PlayerAccuracy is not null).Select(x => x.PlayerAccuracy!.Value).ToList());
+
+            return new WeeklyTrendDto(group.Key, total, wins, draws, losses, scoreRate, avgAccuracy);
+        })
+        .ToList();
+}
+
+static long GetWeekStartUnix(long endTimeUnix)
+{
+    var dt = DateTimeOffset.FromUnixTimeSeconds(endTimeUnix).UtcDateTime.Date;
+    var diff = (7 + (int)dt.DayOfWeek - (int)DayOfWeek.Monday) % 7;
+    var monday = dt.AddDays(-diff);
+    return new DateTimeOffset(monday, TimeSpan.Zero).ToUnixTimeSeconds();
+}
+
+static IReadOnlyList<TimeClassStatsDto> BuildTimeClassBreakdown(IEnumerable<ParsedGame> games)
+{
+    return games
+        .GroupBy(g => g.TimeClass)
+        .Select(group =>
+        {
+            var wins = group.Count(x => x.Outcome == GameOutcome.Win);
+            var draws = group.Count(x => x.Outcome == GameOutcome.Draw);
+            var losses = group.Count(x => x.Outcome == GameOutcome.Loss);
+            var total = group.Count();
+            var scoreRate = total > 0 ? Math.Round(((wins + (draws * 0.5)) / total) * 100, 1) : 0;
+            var avgAcc = AvgOrNull(group.Where(x => x.PlayerAccuracy is not null).Select(x => x.PlayerAccuracy!.Value).ToList());
+            return new TimeClassStatsDto(group.Key, total, wins, draws, losses, scoreRate, avgAcc);
+        })
+        .OrderByDescending(x => x.Games)
+        .ToList();
+}
+
+static OpponentRangeSummaryDto BuildOpponentRangeSummary(IEnumerable<ParsedGame> games)
+{
+    var buckets = new List<OpponentRangeDto>();
+    var grouped = games
+        .Where(g => g.PlayerRating is not null && g.OpponentRating is not null)
+        .GroupBy(g => GetOpponentRangeLabel((g.OpponentRating!.Value - g.PlayerRating!.Value)))
+        .ToList();
+
+    foreach (var group in grouped)
+    {
+        var wins = group.Count(x => x.Outcome == GameOutcome.Win);
+        var draws = group.Count(x => x.Outcome == GameOutcome.Draw);
+        var losses = group.Count(x => x.Outcome == GameOutcome.Loss);
+        var total = group.Count();
+        var scoreRate = total > 0 ? Math.Round(((wins + (draws * 0.5)) / total) * 100, 1) : 0;
+        buckets.Add(new OpponentRangeDto(group.Key, total, wins, draws, losses, scoreRate));
+    }
+
+    return new OpponentRangeSummaryDto(buckets.OrderByDescending(x => x.Games).ToList());
+}
+
+static string GetOpponentRangeLabel(int ratingDiff)
+{
+    return ratingDiff switch
+    {
+        >= 200 => "Acima (+200 ou mais)",
+        <= -200 => "Abaixo (-200 ou mais)",
+        _ => "Parelho (-199 a +199)"
+    };
+}
+
+static IReadOnlyList<OpeningRecommendationDto> BuildOpeningRecommendations(OpeningSummaryDto openings)
+{
+    var list = new List<OpeningRecommendationDto>();
+
+    list.AddRange(openings.Best.Take(3).Select(o => new OpeningRecommendationDto(
+        o.Name,
+        "Manter",
+        $"Continue no repertorio principal ({o.ScoreRate}% em {o.Games} jogos).",
+        GetConfidenceLabel(o.Games))));
+
+    list.AddRange(openings.Worst.Take(3).Select(o => new OpeningRecommendationDto(
+        o.Name,
+        o.SufferingIndex >= 20 ? "Evitar por enquanto" : "Revisar",
+        $"Foco tatico nessa familia. Indice de sofrimento {o.SufferingIndex}%.",
+        GetConfidenceLabel(o.Games))));
+
+    return list;
+}
+
+static MonthComparisonDto BuildMonthComparison(IEnumerable<ParsedGame> games)
+{
+    var grouped = games
+        .GroupBy(g => DateTimeOffset.FromUnixTimeSeconds(g.EndTimeUnix).UtcDateTime.ToString("yyyy-MM"))
+        .OrderBy(g => g.Key)
+        .ToList();
+
+    if (grouped.Count == 0)
+    {
+        return new MonthComparisonDto(null, null, null, null, null);
+    }
+
+    var current = BuildMonthMetrics(grouped.Last());
+    var previous = grouped.Count >= 2 ? BuildMonthMetrics(grouped[^2]) : null;
+
+    double? scoreDelta = previous is null ? null : Math.Round(current.ScoreRate - previous.ScoreRate, 1);
+    double? accuracyDelta = previous is null || current.AverageAccuracy is null || previous.AverageAccuracy is null
+        ? null
+        : Math.Round(current.AverageAccuracy.Value - previous.AverageAccuracy.Value, 1);
+
+    return new MonthComparisonDto(current, previous, scoreDelta, accuracyDelta, previous is null ? null : current.Games - previous.Games);
+}
+
+static MonthMetricsDto BuildMonthMetrics(IGrouping<string, ParsedGame> group)
+{
+    var wins = group.Count(x => x.Outcome == GameOutcome.Win);
+    var draws = group.Count(x => x.Outcome == GameOutcome.Draw);
+    var losses = group.Count(x => x.Outcome == GameOutcome.Loss);
+    var total = group.Count();
+    var scoreRate = total > 0 ? Math.Round(((wins + (draws * 0.5)) / total) * 100, 1) : 0;
+    var avgAcc = AvgOrNull(group.Where(x => x.PlayerAccuracy is not null).Select(x => x.PlayerAccuracy!.Value).ToList());
+    return new MonthMetricsDto(group.Key, total, wins, draws, losses, scoreRate, avgAcc);
+}
+
+static ConfidenceSummaryDto BuildConfidenceSummary(int sampleSize, OpeningSummaryDto openings, string? timeClassFilter)
+{
+    var openingGames = openings.Worst.FirstOrDefault()?.Games ?? openings.Best.FirstOrDefault()?.Games ?? 0;
+    return new ConfidenceSummaryDto(
+        SampleLabel: GetConfidenceLabel(sampleSize),
+        OpeningsLabel: GetConfidenceLabel(openingGames),
+        FilterLabel: string.IsNullOrWhiteSpace(timeClassFilter) ? "Todos os ritmos" : timeClassFilter);
+}
+
+static string GetConfidenceLabel(int games)
+{
+    return games switch
+    {
+        >= 30 => "Alta",
+        >= 12 => "Media",
+        >= 5 => "Baixa",
+        _ => "Muito baixa"
+    };
+}
+
+static SevenDayPlanDto BuildSevenDayTrainingPlan(
+    SuccessSummaryDto successSummary,
+    OpeningSummaryDto openings,
+    IReadOnlyList<PiecePressureDto> piecePressure,
+    IReadOnlyList<PhasePressureDto> phasePressure,
+    AccuracySummaryDto accuracy,
+    string? timeClassFilter)
+{
+    var weakestOpening = openings.Worst.FirstOrDefault()?.Name ?? "abertura principal";
+    var riskyPiece = piecePressure.FirstOrDefault()?.Piece ?? "pecas menores";
+    var weakPhase = phasePressure.FirstOrDefault()?.Phase ?? "Meio-jogo";
+    var strengthsAnchor = successSummary.BestOpening?.Name ?? "sua melhor abertura";
+
+    var items = new List<PlanDayItemDto>
+    {
+        new("Dia 1", "Base de abertura", $"Revisar 3 ideias da familia {weakestOpening} e montar plano simples de lances."),
+        new("Dia 2", "Precisao", $"Analisar 2 derrotas recentes e marcar o primeiro momento de queda de avaliacao."),
+        new("Dia 3", "Peca critica", $"Treinar 20 taticas com foco em decisoes envolvendo {riskyPiece}."),
+        new("Dia 4", "Fase fragil", $"Fazer 3 exercicios especificos de {weakPhase} com controle de tempo."),
+        new("Dia 5", "Forca atual", $"Jogar e revisar uma partida repetindo principios da sua forca: {strengthsAnchor}."),
+        new("Dia 6", "Consistencia", "Jogar 3 partidas no ritmo foco e revisar apenas erros forçados."),
+        new("Dia 7", "Fechamento", "Comparar desempenho da semana e ajustar repertorio para o proximo ciclo.")
+    };
+
+    return new SevenDayPlanDto(timeClassFilter ?? "all", accuracy.OverallAverage, items);
+}
+
+static async Task<ThemeTipsDto> BuildThemeTipsAsync(
+    IHttpClientFactory httpClientFactory,
+    IConfiguration configuration,
+    string username,
+    int sampleSize,
+    OpeningSummaryDto openings,
+    IReadOnlyList<PhasePressureDto> phasePressure,
+    IReadOnlyList<PiecePressureDto> piecePressure,
+    SuccessSummaryDto successSummary,
+    CancellationToken cancellationToken)
+{
+    var fallback = BuildThemeTipsFallback(openings, phasePressure, piecePressure, successSummary);
+    var apiKey = configuration["OPENAI_API_KEY"];
+    if (string.IsNullOrWhiteSpace(apiKey))
+    {
+        return fallback;
+    }
+
+    try
+    {
+        var http = httpClientFactory.CreateClient();
+        http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiKey);
+
+        var prompt = $"""
+        Gere 4 dicas curtas em portugues separadas por || nos temas: abertura || meio-jogo || final || decisao.
+        Jogador: {username}. Amostra: {sampleSize}.
+        Melhor abertura: {successSummary.BestOpening?.Name}. Pior abertura: {openings.Worst.FirstOrDefault()?.Name}.
+        Fase critica: {phasePressure.FirstOrDefault()?.Phase}. Peca sob risco: {piecePressure.FirstOrDefault()?.Piece}.
+        """;
+
+        var payload = new
+        {
+            model = "gpt-4o-mini",
+            temperature = 0.4,
+            messages = new object[]
+            {
+                new { role = "system", content = "Seja objetivo." },
+                new { role = "user", content = prompt }
+            }
+        };
+
+        var response = await http.PostAsync(
+            "https://api.openai.com/v1/chat/completions",
+            new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json"),
+            cancellationToken);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            return fallback;
+        }
+
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        using var json = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+        var content = json.RootElement.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString();
+        if (string.IsNullOrWhiteSpace(content))
+        {
+            return fallback;
+        }
+
+        var parts = content.Split("||", StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length < 4)
+        {
+            return fallback;
+        }
+
+        return new ThemeTipsDto(parts[0], parts[1], parts[2], parts[3]);
+    }
+    catch
+    {
+        return fallback;
+    }
+}
+
+static ThemeTipsDto BuildThemeTipsFallback(
+    OpeningSummaryDto openings,
+    IReadOnlyList<PhasePressureDto> phasePressure,
+    IReadOnlyList<PiecePressureDto> piecePressure,
+    SuccessSummaryDto successSummary)
+{
+    var worstOpening = openings.Worst.FirstOrDefault()?.Name ?? "abertura principal";
+    var weakPhase = phasePressure.FirstOrDefault()?.Phase ?? "meio-jogo";
+    var riskyPiece = piecePressure.FirstOrDefault()?.Piece ?? "peca principal";
+
+    return new ThemeTipsDto(
+        Opening: $"Mantenha {successSummary.BestOpening?.Name ?? "sua linha mais estavel"} e revise planos da familia {worstOpening}.",
+        Middlegame: $"No {weakPhase}, reduza lances forçados e priorize melhoria de peca antes de ataque.",
+        Endgame: "Treine finais tecnicos basicos (rei e peoes, torres) 15 min por dia para conversao limpa.",
+        Decision: $"Antes de jogar com {riskyPiece}, valide 2 lances do adversario para reduzir erros nao forçados.");
+}
+
+static GameOverviewDto BuildGameOverview(ParsedGame game)
+{
+    return new GameOverviewDto(
+        PlayedAtUnix: game.EndTimeUnix,
+        Opponent: game.OpponentUsername ?? "Desconhecido",
+        Color: game.IsWhite ? "Brancas" : "Pretas",
+        Result: MapOutcomeLabel(game.Outcome),
+        ResultCode: game.PlayerResultCode,
+        TimeClass: game.TimeClass,
+        TimeControl: game.TimeControl,
+        OpeningFamily: NormalizeOpeningFamily(game.Opening),
+        Opening: game.Opening,
+        Accuracy: game.PlayerAccuracy,
+        FullMoves: Math.Max(1, (int)Math.Ceiling(game.PlyCount / 2d)),
+        GameUrl: game.GameUrl);
+}
+
+static IReadOnlyList<string> BuildGameStrengths(ParsedGame game, OpeningSummaryDto openings)
+{
+    var strengths = new List<string>();
+    if (game.Outcome == GameOutcome.Win)
+    {
+        strengths.Add("Converteu a partida em resultado positivo.");
+    }
+
+    if (game.PlayerAccuracy is double acc && acc >= 85)
+    {
+        strengths.Add($"Precisao alta na partida ({Math.Round(acc, 1)}%).");
+    }
+
+    if (openings.Best.Any(x => x.Name.Equals(NormalizeOpeningFamily(game.Opening), StringComparison.OrdinalIgnoreCase)))
+    {
+        strengths.Add("Partida em familia de abertura onde voce historicamente performa bem.");
+    }
+
+    if (strengths.Count == 0)
+    {
+        strengths.Add("Manteve estrutura competitiva durante boa parte da partida.");
+    }
+
+    return strengths;
+}
+
+static IReadOnlyList<string> BuildGameMistakes(
+    ParsedGame game,
+    OpeningSummaryDto openings,
+    IReadOnlyList<PhasePressureDto> phasePressure,
+    IReadOnlyList<PiecePressureDto> piecePressure)
+{
+    var mistakes = new List<string>();
+    var phase = GetPhaseFromPlyCount(game.PlyCount);
+
+    if (game.Outcome == GameOutcome.Loss)
+    {
+        mistakes.Add($"Resultado final negativo ({game.PlayerResultCode}).");
+    }
+
+    if (game.PlayerAccuracy is double acc && acc < 78)
+    {
+        mistakes.Add($"Precisao abaixo do ideal ({Math.Round(acc, 1)}%).");
+    }
+
+    if (phasePressure.FirstOrDefault()?.Phase == phase)
+    {
+        mistakes.Add($"Erros concentrados na fase em que voce mais sofre: {phase}.");
+    }
+
+    if (openings.Worst.Any(x => x.Name.Equals(NormalizeOpeningFamily(game.Opening), StringComparison.OrdinalIgnoreCase)))
+    {
+        mistakes.Add("Abertura da partida esta entre as familias de maior sofrimento estatistico.");
+    }
+
+    var riskyPiece = piecePressure.FirstOrDefault();
+    if (riskyPiece is not null)
+    {
+        mistakes.Add($"Atencao especial nas decisoes com {riskyPiece.Piece} em momentos taticos.");
+    }
+
+    return mistakes.Take(4).ToList();
+}
+
+static IReadOnlyList<string> BuildGameImprovements(
+    ParsedGame game,
+    OpeningSummaryDto openings,
+    IReadOnlyList<PhasePressureDto> phasePressure,
+    IReadOnlyList<PiecePressureDto> piecePressure)
+{
+    var improvements = new List<string>();
+    var worstOpening = openings.Worst.FirstOrDefault();
+    if (worstOpening is not null)
+    {
+        improvements.Add($"Revisar planos da familia {worstOpening.Name} com 3 ideias-chave antes do proximo jogo.");
+    }
+
+    var weakPhase = phasePressure.FirstOrDefault()?.Phase;
+    if (weakPhase is not null)
+    {
+        improvements.Add($"Fazer treino curto focado em {weakPhase} (20 min) para reduzir quedas de avaliacao.");
+    }
+
+    var riskyPiece = piecePressure.FirstOrDefault()?.Piece;
+    if (riskyPiece is not null)
+    {
+        improvements.Add($"Em lances com {riskyPiece}, aplique checklist: ameaca, troca, e casa de fuga.");
+    }
+
+    if (game.PlayerAccuracy is double acc && acc < 82)
+    {
+        improvements.Add("Reanalisar a partida e marcar o primeiro lance que muda o rumo, criando uma regra pratica para evitar repeticao.");
+    }
+
+    return improvements.Take(4).ToList();
+}
+
+static async Task<string> BuildGameAiCommentAsync(
+    IHttpClientFactory httpClientFactory,
+    IConfiguration configuration,
+    string username,
+    GameOverviewDto overview,
+    IReadOnlyList<string> strengths,
+    IReadOnlyList<string> mistakes,
+    IReadOnlyList<string> improvements,
+    CancellationToken cancellationToken)
+{
+    var fallback = $"Partida de {overview.Result.ToLowerInvariant()} em {overview.TimeClass}. Melhorias imediatas: {string.Join(" ", improvements.Take(2))}";
+    var apiKey = configuration["OPENAI_API_KEY"];
+    if (string.IsNullOrWhiteSpace(apiKey))
+    {
+        return fallback;
+    }
+
+    try
+    {
+        var http = httpClientFactory.CreateClient();
+        http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiKey);
+        var prompt = $"""
+        Analise esta partida de xadrez em portugues em ate 4 frases.
+        Jogador: {username}
+        Contexto: {overview.Result} de {overview.Color} na abertura {overview.OpeningFamily}, precisao {overview.Accuracy}%.
+        Pontos fortes: {string.Join(" | ", strengths)}
+        Erros: {string.Join(" | ", mistakes)}
+        Melhorias: {string.Join(" | ", improvements)}
+        """;
+
+        var payload = new
+        {
+            model = "gpt-4o-mini",
+            temperature = 0.4,
+            messages = new object[]
+            {
+                new { role = "system", content = "Coach de xadrez objetivo." },
+                new { role = "user", content = prompt }
+            }
+        };
+
+        var response = await http.PostAsync(
+            "https://api.openai.com/v1/chat/completions",
+            new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json"),
+            cancellationToken);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            return fallback;
+        }
+
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        using var json = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+        var content = json.RootElement.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString();
+        return string.IsNullOrWhiteSpace(content) ? fallback : content.Trim();
+    }
+    catch
+    {
+        return fallback;
+    }
+}
+
 static async Task<string> BuildAiTipAsync(
     IHttpClientFactory httpClientFactory,
     IConfiguration configuration,
@@ -641,6 +1346,7 @@ static async Task<string> BuildAiTipAsync(
     IReadOnlyList<PiecePressureDto> piecePressure,
     IReadOnlyList<PhasePressureDto> phasePressure,
     SuccessSummaryDto successSummary,
+    IReadOnlyList<RecentGameDto> recentGames,
     AccuracySummaryDto accuracy,
     CancellationToken cancellationToken)
 {
@@ -657,7 +1363,7 @@ static async Task<string> BuildAiTipAsync(
         var http = httpClientFactory.CreateClient();
         http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiKey);
 
-        var prompt = BuildAiPrompt(username, sampleSize, profileStats, openings, byColor, piecePressure, phasePressure, successSummary, accuracy);
+        var prompt = BuildAiPrompt(username, sampleSize, profileStats, openings, byColor, piecePressure, phasePressure, successSummary, recentGames, accuracy);
         var payload = new
         {
             model = "gpt-4o-mini",
@@ -706,12 +1412,16 @@ static string BuildAiPrompt(
     IReadOnlyList<PiecePressureDto> piecePressure,
     IReadOnlyList<PhasePressureDto> phasePressure,
     SuccessSummaryDto successSummary,
+    IReadOnlyList<RecentGameDto> recentGames,
     AccuracySummaryDto accuracy)
 {
     var bestOpening = openings.Best.FirstOrDefault();
     var worstOpening = openings.Worst.FirstOrDefault();
     var riskiestPiece = piecePressure.FirstOrDefault();
     var worstPhase = phasePressure.FirstOrDefault();
+    var recentGamesText = recentGames.Count > 0
+        ? string.Join(" | ", recentGames.Select(g => $"{g.Result} vs {g.Opponent} ({g.Color}, {g.TimeClass}, {g.OpeningFamily})"))
+        : "Sem jogos recentes detalhados.";
 
     return $"""
     Jogador: {username}
@@ -725,6 +1435,7 @@ static string BuildAiPrompt(
     Peca sob pressao: {riskiestPiece?.Piece} ({riskiestPiece?.RiskRate}%)
     Fase critica: {worstPhase?.Phase}
     Precisao media: {accuracy.OverallAverage}%
+    Ultimos {recentGames.Count} jogos: {recentGamesText}
 
     Gere uma dica pratica em ate 3 frases equilibrando pontos fortes e pontos de evolucao para as proximas semanas.
     """;
@@ -1042,6 +1753,12 @@ sealed record ParsedGame(
     GameOutcome Outcome,
     string Opening,
     string PlayerResultCode,
+    string? OpponentUsername,
+    string TimeClass,
+    string? TimeControl,
+    string? GameUrl,
+    int? PlayerRating,
+    int? OpponentRating,
     double? PlayerAccuracy,
     Dictionary<string, int> PlayerPieceMoves,
     int PlyCount,
@@ -1059,8 +1776,19 @@ public sealed record PlayerDeepAnalysisResponse(
     IReadOnlyList<PhasePressureDto> PhasePressure,
     IReadOnlyList<PhasePerformanceDto> PhasePerformance,
     SuccessSummaryDto SuccessSummary,
+    IReadOnlyList<RecentGameDto> RecentGames,
+    OverallScoreDto OverallScore,
+    IReadOnlyList<WeeklyTrendDto> WeeklyTrend,
+    IReadOnlyList<TimeClassStatsDto> TimeClassBreakdown,
+    OpponentRangeSummaryDto OpponentRanges,
+    IReadOnlyList<OpeningRecommendationDto> OpeningRecommendations,
+    SevenDayPlanDto TrainingPlan,
+    MonthComparisonDto MonthComparison,
+    ThemeTipsDto ThemedTips,
+    ConfidenceSummaryDto Confidence,
     string AiTip,
     int SampleSize,
+    string? TimeClassFilter,
     int DataWindowMonths,
     long GeneratedAtUnix);
 
@@ -1122,4 +1850,108 @@ public sealed record SuccessSummaryDto(
     string? BestAccuracySide,
     IReadOnlyList<string> Highlights);
 
+public sealed record RecentGameDto(
+    long PlayedAtUnix,
+    string Opponent,
+    string Color,
+    string Result,
+    string ResultCode,
+    string TimeClass,
+    string OpeningFamily,
+    string Opening,
+    double? Accuracy,
+    int FullMoves,
+    string? GameUrl);
+
 public sealed record AccuracySummaryDto(double? OverallAverage, double? WhiteAverage, double? BlackAverage, int GamesWithAccuracy);
+
+public sealed record OverallScoreDto(double Value, string Level, string Description);
+
+public sealed record WeeklyTrendDto(
+    long WeekStartUnix,
+    int Games,
+    int Wins,
+    int Draws,
+    int Losses,
+    double ScoreRate,
+    double? AverageAccuracy);
+
+public sealed record TimeClassStatsDto(
+    string TimeClass,
+    int Games,
+    int Wins,
+    int Draws,
+    int Losses,
+    double ScoreRate,
+    double? AverageAccuracy);
+
+public sealed record OpponentRangeSummaryDto(IReadOnlyList<OpponentRangeDto> Buckets);
+
+public sealed record OpponentRangeDto(
+    string Range,
+    int Games,
+    int Wins,
+    int Draws,
+    int Losses,
+    double ScoreRate);
+
+public sealed record OpeningRecommendationDto(
+    string OpeningFamily,
+    string Action,
+    string Reason,
+    string Confidence);
+
+public sealed record MonthComparisonDto(
+    MonthMetricsDto? Current,
+    MonthMetricsDto? Previous,
+    double? ScoreRateDelta,
+    double? AccuracyDelta,
+    int? GamesDelta);
+
+public sealed record MonthMetricsDto(
+    string Month,
+    int Games,
+    int Wins,
+    int Draws,
+    int Losses,
+    double ScoreRate,
+    double? AverageAccuracy);
+
+public sealed record ConfidenceSummaryDto(
+    string SampleLabel,
+    string OpeningsLabel,
+    string FilterLabel);
+
+public sealed record SevenDayPlanDto(
+    string TimeClassFocus,
+    double? BaselineAccuracy,
+    IReadOnlyList<PlanDayItemDto> Days);
+
+public sealed record PlanDayItemDto(string Day, string Focus, string Task);
+
+public sealed record ThemeTipsDto(
+    string Opening,
+    string Middlegame,
+    string Endgame,
+    string Decision);
+
+public sealed record GameOverviewDto(
+    long PlayedAtUnix,
+    string Opponent,
+    string Color,
+    string Result,
+    string ResultCode,
+    string TimeClass,
+    string? TimeControl,
+    string OpeningFamily,
+    string Opening,
+    double? Accuracy,
+    int FullMoves,
+    string? GameUrl);
+
+public sealed record GameAnalysisResponse(
+    GameOverviewDto Overview,
+    IReadOnlyList<string> Strengths,
+    IReadOnlyList<string> Mistakes,
+    IReadOnlyList<string> Improvements,
+    string AiComment);

@@ -1,5 +1,6 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
 import { AnalysisPage } from './pages/AnalysisPage'
+import { GameAnalysisPage } from './pages/GameAnalysisPage'
 import { HomePage } from './pages/HomePage'
 
 export default function App() {
@@ -7,6 +8,7 @@ export default function App() {
     <Routes>
       <Route path="/" element={<HomePage />} />
       <Route path="/analysis/:nickname" element={<AnalysisPage />} />
+      <Route path="/analysis/:nickname/game" element={<GameAnalysisPage />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   )
