@@ -124,10 +124,10 @@ app.MapGet("/api/players/{username}/analysis", async (
         var normalizedTimeClass = NormalizeTimeClass(timeClass);
         var cacheKey = $"analysis:{normalizedUsername.ToLowerInvariant()}:{normalizedTimeClass ?? "all"}";
 
-        if (memoryCache.TryGetValue(cacheKey, out PlayerDeepAnalysisResponse? cachedResponse) && cachedResponse is not null)
-        {
-            return Results.Ok(cachedResponse);
-        }
+        // if (memoryCache.TryGetValue(cacheKey, out PlayerDeepAnalysisResponse? cachedResponse) && cachedResponse is not null)
+        // {
+        //     return Results.Ok(cachedResponse);
+        // }
 
         var profileResponse = await GetWithRetryAsync(client, $"player/{escapedUsername}", cancellationToken);
         if (profileResponse is null)
@@ -254,6 +254,88 @@ app.MapGet("/api/players/{username}/analysis", async (
 })
 .WithName("GetPlayerDeepAnalysis");
 
+app.MapPost("/api/players/{username}/analysis/ask", async (
+    string username,
+    AskAnalysisRequest? request,
+    IHttpClientFactory httpClientFactory,
+    IConfiguration configuration,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        var normalizedUsername = NormalizeUsername(username);
+        if (normalizedUsername is null)
+        {
+            return Results.BadRequest(new { message = "Informe um nickname valido." });
+        }
+
+        var question = request?.Question?.Trim();
+        if (string.IsNullOrWhiteSpace(question))
+        {
+            return Results.BadRequest(new { message = "Informe uma pergunta para a IA." });
+        }
+
+        if (question.Length > 420)
+        {
+            return Results.BadRequest(new { message = "Pergunta muito longa. Use ate 420 caracteres." });
+        }
+
+        var normalizedTimeClass = NormalizeTimeClass(request?.TimeClass);
+        var client = httpClientFactory.CreateClient("ChessCom");
+        var games = await FetchRecentGamesAsync(client, normalizedUsername, cancellationToken);
+        var filteredGames = FilterGamesByTimeClass(games, normalizedTimeClass);
+
+        if (filteredGames.Count == 0)
+        {
+            return Results.NotFound(new { message = "Sem partidas suficientes para responder com contexto." });
+        }
+
+        var profileStats = BuildProfileStats(null);
+        var byColor = BuildByColor(filteredGames);
+        var openings = BuildOpenings(filteredGames);
+        var piecePressure = BuildPiecePressure(filteredGames);
+        var phasePressure = BuildPhasePressure(filteredGames);
+        var phasePerformance = BuildPhasePerformance(filteredGames);
+        var accuracy = BuildAccuracy(filteredGames);
+        var successSummary = BuildSuccessSummary(byColor, openings, piecePressure, phasePerformance, accuracy);
+        var recentGames = BuildRecentGames(filteredGames);
+
+        var answer = await BuildAnalysisQuestionAnswerAsync(
+            httpClientFactory,
+            configuration,
+            normalizedUsername,
+            question,
+            filteredGames.Count,
+            profileStats,
+            openings,
+            byColor,
+            piecePressure,
+            phasePressure,
+            successSummary,
+            recentGames,
+            accuracy,
+            cancellationToken);
+
+        return Results.Ok(new AskAnalysisResponse(
+            Question: question,
+            Answer: answer,
+            SampleSize: filteredGames.Count,
+            TimeClassFilter: normalizedTimeClass,
+            GeneratedAtUnix: DateTimeOffset.UtcNow.ToUnixTimeSeconds()));
+    }
+    catch (OperationCanceledException)
+    {
+        return cancellationToken.IsCancellationRequested
+            ? Results.StatusCode(499)
+            : Results.StatusCode(StatusCodes.Status504GatewayTimeout);
+    }
+    catch (HttpRequestException)
+    {
+        return Results.Problem("Falha de rede ao consultar o Chess.com.", statusCode: StatusCodes.Status502BadGateway);
+    }
+})
+.WithName("AskPlayerAnalysis");
+
 app.MapGet("/api/players/{username}/game-analysis", async (
     string username,
     string gameUrl,
@@ -299,6 +381,7 @@ app.MapGet("/api/players/{username}/game-analysis", async (
             strengths,
             mistakes,
             improvements,
+            target.SanMoves,
             cancellationToken);
 
         return Results.Ok(new GameAnalysisResponse(
@@ -320,6 +403,96 @@ app.MapGet("/api/players/{username}/game-analysis", async (
     }
 })
 .WithName("GetGameAnalysis");
+
+app.MapPost("/api/players/{username}/game-analysis/chat", async (
+    string username,
+    GameChatRequest? request,
+    IHttpClientFactory httpClientFactory,
+    IConfiguration configuration,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        var normalizedUsername = NormalizeUsername(username);
+        if (normalizedUsername is null)
+        {
+            return Results.BadRequest(new { message = "Informe um nickname valido." });
+        }
+
+        var gameUrl = request?.GameUrl?.Trim();
+        if (string.IsNullOrWhiteSpace(gameUrl))
+        {
+            return Results.BadRequest(new { message = "Informe a URL da partida para conversar com a IA." });
+        }
+
+        var question = request?.Question?.Trim();
+        if (string.IsNullOrWhiteSpace(question))
+        {
+            return Results.BadRequest(new { message = "Digite uma pergunta para o chat." });
+        }
+
+        if (question.Length > 700)
+        {
+            return Results.BadRequest(new { message = "Pergunta muito longa. Use ate 700 caracteres." });
+        }
+
+        var history = (request?.History ?? Array.Empty<GameChatMessageInputDto>())
+            .Where(m => m is not null)
+            .Select(m => new GameChatMessageInputDto(
+                Role: string.Equals(m.Role, "assistant", StringComparison.OrdinalIgnoreCase) ? "assistant" : "user",
+                Content: (m.Content ?? string.Empty).Trim()))
+            .Where(m => !string.IsNullOrWhiteSpace(m.Content))
+            .TakeLast(18)
+            .ToList();
+
+        var client = httpClientFactory.CreateClient("ChessCom");
+        var games = await FetchRecentGamesAsync(client, normalizedUsername, cancellationToken);
+        var target = FindGameByUrl(games, gameUrl);
+
+        if (target is null)
+        {
+            return Results.NotFound(new { message = "Partida nao encontrada nos ultimos 3 meses." });
+        }
+
+        var openings = BuildOpenings(games);
+        var piecePressure = BuildPiecePressure(games);
+        var phasePressure = BuildPhasePressure(games);
+        var overview = BuildGameOverview(target);
+        var strengths = BuildGameStrengths(target, openings);
+        var mistakes = BuildGameMistakes(target, openings, phasePressure, piecePressure);
+        var improvements = BuildGameImprovements(target, openings, phasePressure, piecePressure);
+
+        var answer = await BuildGameChatAnswerAsync(
+            httpClientFactory,
+            configuration,
+            normalizedUsername,
+            overview,
+            strengths,
+            mistakes,
+            improvements,
+            question,
+            history,
+            target.SanMoves,
+            cancellationToken);
+
+        return Results.Ok(new GameChatResponse(
+            Question: question,
+            Answer: answer,
+            HistoryCount: history.Count + 2,
+            GeneratedAtUnix: DateTimeOffset.UtcNow.ToUnixTimeSeconds()));
+    }
+    catch (OperationCanceledException)
+    {
+        return cancellationToken.IsCancellationRequested
+            ? Results.StatusCode(499)
+            : Results.StatusCode(StatusCodes.Status504GatewayTimeout);
+    }
+    catch (HttpRequestException)
+    {
+        return Results.Problem("Falha de rede ao consultar o Chess.com.", statusCode: StatusCodes.Status502BadGateway);
+    }
+})
+.WithName("ChatGameAnalysis");
 
 app.Run();
 
@@ -527,6 +700,7 @@ static bool TryParseGame(JsonElement game, string username, out ParsedGame parse
         OpponentRating: opponentRating,
         PlayerAccuracy: accuracy,
         PlayerPieceMoves: pieceCounters,
+        SanMoves: sanMoves,
         PlyCount: sanMoves.Count,
         EndTimeUnix: GetLong(game, "end_time") ?? 0);
 
@@ -1081,7 +1255,7 @@ static async Task<ThemeTipsDto> BuildThemeTipsAsync(
     CancellationToken cancellationToken)
 {
     var fallback = BuildThemeTipsFallback(openings, phasePressure, piecePressure, successSummary);
-    var apiKey = configuration["OPENAI_API_KEY"];
+    var apiKey = configuration["OpenAiKey"];
     if (string.IsNullOrWhiteSpace(apiKey))
     {
         return fallback;
@@ -1281,10 +1455,11 @@ static async Task<string> BuildGameAiCommentAsync(
     IReadOnlyList<string> strengths,
     IReadOnlyList<string> mistakes,
     IReadOnlyList<string> improvements,
+    IReadOnlyList<string> sanMoves,
     CancellationToken cancellationToken)
 {
     var fallback = $"Partida de {overview.Result.ToLowerInvariant()} em {overview.TimeClass}. Melhorias imediatas: {string.Join(" ", improvements.Take(2))}";
-    var apiKey = configuration["OPENAI_API_KEY"];
+    var apiKey = configuration["OpenAiKey"];
     if (string.IsNullOrWhiteSpace(apiKey))
     {
         return fallback;
@@ -1294,10 +1469,12 @@ static async Task<string> BuildGameAiCommentAsync(
     {
         var http = httpClientFactory.CreateClient();
         http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiKey);
+        var movesContext = BuildMovesContextForAi(sanMoves);
         var prompt = $"""
         Analise esta partida de xadrez em portugues em ate 4 frases.
         Jogador: {username}
         Contexto: {overview.Result} de {overview.Color} na abertura {overview.OpeningFamily}, precisao {overview.Accuracy}%.
+        Lances da partida (resumo): {movesContext}
         Pontos fortes: {string.Join(" | ", strengths)}
         Erros: {string.Join(" | ", mistakes)}
         Melhorias: {string.Join(" | ", improvements)}
@@ -1306,10 +1483,16 @@ static async Task<string> BuildGameAiCommentAsync(
         var payload = new
         {
             model = "gpt-4o-mini",
-            temperature = 0.4,
+            temperature = 0.78,
+            frequency_penalty = 0.35,
+            presence_penalty = 0.2,
             messages = new object[]
             {
-                new { role = "system", content = "Coach de xadrez objetivo." },
+                new
+                {
+                    role = "system",
+                    content = "Voce e um treinador humano de xadrez: fale de forma natural, sem texto engessado e sem repetir estrutura fixa. Use os dados so como base, mas responda como conversa real com o jogador."
+                },
                 new { role = "user", content = prompt }
             }
         };
@@ -1335,6 +1518,190 @@ static async Task<string> BuildGameAiCommentAsync(
     }
 }
 
+static async Task<string> BuildGameChatAnswerAsync(
+    IHttpClientFactory httpClientFactory,
+    IConfiguration configuration,
+    string username,
+    GameOverviewDto overview,
+    IReadOnlyList<string> strengths,
+    IReadOnlyList<string> mistakes,
+    IReadOnlyList<string> improvements,
+    string question,
+    IReadOnlyList<GameChatMessageInputDto> history,
+    IReadOnlyList<string> sanMoves,
+    CancellationToken cancellationToken)
+{
+    var fallback = BuildGameChatFallback(question, overview, strengths, improvements, mistakes, sanMoves);
+    var apiKey = configuration["OpenAiKey"];
+
+    if (string.IsNullOrWhiteSpace(apiKey))
+    {
+        return fallback;
+    }
+
+    try
+    {
+        var movesContext = BuildMovesContextForAi(sanMoves);
+        var historyText = history.Count == 0
+            ? "Sem historico anterior."
+            : string.Join("\n", history.Select((m, i) =>
+                $"{(string.Equals(m.Role, "assistant", StringComparison.OrdinalIgnoreCase) ? "Coach" : "Jogador")} {i + 1}: {m.Content}"));
+
+        var prompt = $"""
+        Voce esta em um chat de acompanhamento de uma unica partida.
+
+        Jogador: {username}
+        Partida: {overview.Result} de {overview.Color} contra {overview.Opponent} em {overview.TimeClass}
+        Abertura: {overview.OpeningFamily}
+        Precisao: {overview.Accuracy}%
+        Lances da partida (resumo): {movesContext}
+        Pontos fortes: {string.Join(" | ", strengths)}
+        Erros: {string.Join(" | ", mistakes)}
+        Melhorias: {string.Join(" | ", improvements)}
+
+        Historico do chat:
+        {historyText}
+
+        Nova pergunta do jogador:
+        {question}
+
+        Responda como treinador humano, sem repetir template, em portugues natural.
+        Seja pratico e conectado ao historico da conversa.
+        """;
+
+        var http = httpClientFactory.CreateClient();
+        http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiKey);
+
+        var payload = new
+        {
+            model = "gpt-4o-mini",
+            temperature = 0.9,
+            frequency_penalty = 0.5,
+            presence_penalty = 0.3,
+            messages = new object[]
+            {
+                new
+                {
+                    role = "system",
+                    content = "Voce e um coach de xadrez em conversa continua com o jogador. Evite repeticao e respostas genericas."
+                },
+                new { role = "user", content = prompt }
+            }
+        };
+
+        var body = JsonSerializer.Serialize(payload);
+        var response = await http.PostAsync(
+            "https://api.openai.com/v1/chat/completions",
+            new StringContent(body, Encoding.UTF8, "application/json"),
+            cancellationToken);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            return fallback;
+        }
+
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        using var json = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+        var content = json.RootElement
+            .GetProperty("choices")[0]
+            .GetProperty("message")
+            .GetProperty("content")
+            .GetString();
+
+        return string.IsNullOrWhiteSpace(content) ? fallback : content.Trim();
+    }
+    catch
+    {
+        return fallback;
+    }
+}
+
+static string BuildGameChatFallback(
+    string question,
+    GameOverviewDto overview,
+    IReadOnlyList<string> strengths,
+    IReadOnlyList<string> improvements,
+    IReadOnlyList<string> mistakes,
+    IReadOnlyList<string> sanMoves)
+{
+    var q = question.ToLowerInvariant();
+    var openingMoves = string.Join(' ', sanMoves.Take(8));
+    var middlePivot = Math.Max(0, (sanMoves.Count / 2) - 3);
+    var middleMoves = string.Join(' ', sanMoves.Skip(middlePivot).Take(6));
+    var endingMoves = string.Join(' ', sanMoves.Skip(Math.Max(0, sanMoves.Count - 8)).Take(8));
+    var accuracyText = overview.Accuracy is null ? "sem dado de precisao" : $"{overview.Accuracy:0.0}% de precisao";
+
+    if (q.Contains("resum") || q.Contains("resumo"))
+    {
+        var summaryParts = new List<string>
+        {
+            $"Resumo da partida: voce jogou de {overview.Color} contra {overview.Opponent} em {overview.TimeClass} e terminou com {overview.Result.ToLowerInvariant()} ({overview.ResultCode}).",
+            $"Foi uma {overview.OpeningFamily} com cerca de {overview.FullMoves} lances e {accuracyText}."
+        };
+
+        if (!string.IsNullOrWhiteSpace(openingMoves))
+        {
+            summaryParts.Add($"No inicio, o jogo seguiu por {openingMoves}.");
+        }
+
+        if (!string.IsNullOrWhiteSpace(middleMoves))
+        {
+            summaryParts.Add($"No meio, os lances mais importantes foram {middleMoves}.");
+        }
+
+        if (!string.IsNullOrWhiteSpace(endingMoves))
+        {
+            summaryParts.Add($"No trecho final, apareceu {endingMoves}.");
+        }
+
+        var keyPoint = mistakes.FirstOrDefault() ?? "faltou consolidar o plano na fase critica";
+        var nextStep = improvements.FirstOrDefault() ?? "revisar os lances que mudaram a avaliacao";
+        summaryParts.Add($"Ponto-chave: {keyPoint}. Proximo passo pratico: {nextStep}.");
+        return string.Join(' ', summaryParts);
+    }
+
+    var firstImprovement = improvements.FirstOrDefault() ?? "revisar os lances criticos da partida";
+    var firstMistake = mistakes.FirstOrDefault() ?? "houve um momento de perda de controle tatico";
+    var firstStrength = strengths.FirstOrDefault() ?? "manteve bons recursos em parte da partida";
+    return $"Sobre sua pergunta: nesta partida ({overview.Result} contra {overview.Opponent}), voce teve como ponto positivo que {firstStrength.ToLowerInvariant()}, mas o ponto critico foi que {firstMistake.ToLowerInvariant()}. Para a proxima partida, eu focaria em {firstImprovement.ToLowerInvariant()}.";
+}
+
+static string BuildMovesContextForAi(IReadOnlyList<string> sanMoves)
+{
+    if (sanMoves.Count == 0)
+    {
+        return "Sem PGN/lances disponiveis na fonte.";
+    }
+
+    var openingSlice = sanMoves.Take(12);
+    var endingSlice = sanMoves.Skip(Math.Max(0, sanMoves.Count - 12));
+    var middleStart = Math.Max(0, (sanMoves.Count / 2) - 4);
+    var middleSlice = sanMoves.Skip(middleStart).Take(8);
+
+    static string JoinWithNumbers(IEnumerable<string> moves, int startPly)
+    {
+        var list = moves.ToList();
+        if (list.Count == 0)
+        {
+            return "-";
+        }
+
+        var numbered = new List<string>();
+        for (var i = 0; i < list.Count; i++)
+        {
+            numbered.Add($"{startPly + i + 1}.{list[i]}");
+        }
+
+        return string.Join(' ', numbered);
+    }
+
+    var openingText = JoinWithNumbers(openingSlice, 0);
+    var middleText = JoinWithNumbers(middleSlice, middleStart);
+    var endingText = JoinWithNumbers(endingSlice, Math.Max(0, sanMoves.Count - 12));
+
+    return $"Inicio: {openingText} | Meio: {middleText} | Final: {endingText}";
+}
+
 static async Task<string> BuildAiTipAsync(
     IHttpClientFactory httpClientFactory,
     IConfiguration configuration,
@@ -1351,7 +1718,7 @@ static async Task<string> BuildAiTipAsync(
     CancellationToken cancellationToken)
 {
     var fallback = BuildRuleBasedTip(profileStats, openings, byColor, piecePressure, phasePressure, successSummary, accuracy, sampleSize);
-    var apiKey = configuration["OPENAI_API_KEY"];
+    var apiKey = configuration["OpenAiKey"];
 
     if (string.IsNullOrWhiteSpace(apiKey))
     {
@@ -1367,10 +1734,16 @@ static async Task<string> BuildAiTipAsync(
         var payload = new
         {
             model = "gpt-4o-mini",
-            temperature = 0.5,
+            temperature = 0.82,
+            frequency_penalty = 0.45,
+            presence_penalty = 0.3,
             messages = new object[]
             {
-                new { role = "system", content = "Voce e um coach de xadrez. Responda em portugues de forma objetiva, em no maximo 3 frases." },
+                new
+                {
+                    role = "system",
+                    content = "Voce e um coach de xadrez conversando com um aluno. Responda em portugues natural, variando o jeito de explicar, evitando respostas roboticas e sem repetir formula pronta."
+                },
                 new { role = "user", content = prompt }
             }
         };
@@ -1437,8 +1810,135 @@ static string BuildAiPrompt(
     Precisao media: {accuracy.OverallAverage}%
     Ultimos {recentGames.Count} jogos: {recentGamesText}
 
-    Gere uma dica pratica em ate 3 frases equilibrando pontos fortes e pontos de evolucao para as proximas semanas.
+    Gere uma dica pratica e personalizada para as proximas semanas.
+    Evite formato fixo; pode usar 1 a 2 paragrafos curtos se fizer sentido.
+    Foque no que mais muda resultado com menor esforco.
     """;
+}
+
+static async Task<string> BuildAnalysisQuestionAnswerAsync(
+    IHttpClientFactory httpClientFactory,
+    IConfiguration configuration,
+    string username,
+    string question,
+    int sampleSize,
+    ProfileStatsSummaryDto profileStats,
+    OpeningSummaryDto openings,
+    ColorSplitDto byColor,
+    IReadOnlyList<PiecePressureDto> piecePressure,
+    IReadOnlyList<PhasePressureDto> phasePressure,
+    SuccessSummaryDto successSummary,
+    IReadOnlyList<RecentGameDto> recentGames,
+    AccuracySummaryDto accuracy,
+    CancellationToken cancellationToken)
+{
+    var fallback = BuildQuestionFallback(question, sampleSize, openings, byColor, phasePressure, piecePressure, successSummary, recentGames, accuracy);
+    var apiKey = configuration["OpenAiKey"];
+
+    if (string.IsNullOrWhiteSpace(apiKey))
+    {
+        return fallback;
+    }
+
+    try
+    {
+        var http = httpClientFactory.CreateClient();
+        http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiKey);
+
+        var baseContext = BuildAiPrompt(username, sampleSize, profileStats, openings, byColor, piecePressure, phasePressure, successSummary, recentGames, accuracy);
+        var prompt = $"""
+        Use o contexto abaixo para responder a pergunta do jogador em portugues de forma natural, personalizada e pratica.
+        Evite resposta padrao e nao siga estrutura fixa.
+        Se houver mais de um caminho valido, diga qual voce priorizaria primeiro e por que.
+
+        Contexto do jogador:
+        {baseContext}
+
+        Pergunta do jogador:
+        {question}
+        """;
+
+        var payload = new
+        {
+            model = "gpt-4o-mini",
+            temperature = 0.88,
+            frequency_penalty = 0.5,
+            presence_penalty = 0.32,
+            messages = new object[]
+            {
+                new
+                {
+                    role = "system",
+                    content = "Voce e um treinador de xadrez experiente, direto e humano. Responda sem tom corporativo e sem frases repetidas. Nunca invente numeros; quando faltar dado, assuma incerteza e sugira proximo passo."
+                },
+                new { role = "user", content = prompt }
+            }
+        };
+
+        var body = JsonSerializer.Serialize(payload);
+        var response = await http.PostAsync(
+            "https://api.openai.com/v1/chat/completions",
+            new StringContent(body, Encoding.UTF8, "application/json"),
+            cancellationToken);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            return fallback;
+        }
+
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        using var json = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+
+        var content = json.RootElement
+            .GetProperty("choices")[0]
+            .GetProperty("message")
+            .GetProperty("content")
+            .GetString();
+
+        return string.IsNullOrWhiteSpace(content) ? fallback : content.Trim();
+    }
+    catch
+    {
+        return fallback;
+    }
+}
+
+static string BuildQuestionFallback(
+    string question,
+    int sampleSize,
+    OpeningSummaryDto openings,
+    ColorSplitDto byColor,
+    IReadOnlyList<PhasePressureDto> phasePressure,
+    IReadOnlyList<PiecePressureDto> piecePressure,
+    SuccessSummaryDto successSummary,
+    IReadOnlyList<RecentGameDto> recentGames,
+    AccuracySummaryDto accuracy)
+{
+    var normalized = question.ToLowerInvariant();
+    var bestOpening = openings.Best.FirstOrDefault();
+    var worstOpening = openings.Worst.FirstOrDefault();
+    var weakPhase = phasePressure.FirstOrDefault()?.Phase ?? "meio-jogo";
+    var riskyPiece = piecePressure.FirstOrDefault()?.Piece ?? "dama";
+    var recentLine = recentGames.Count > 0
+        ? $"Nos ultimos jogos, destaque para {recentGames[0].Result} contra {recentGames[0].Opponent} em {recentGames[0].TimeClass}."
+        : "Sem jogos recentes detalhados para citar.";
+
+    if (normalized.Contains("abertura"))
+    {
+        return $"Sobre sua pergunta de abertura: nos {sampleSize} jogos recentes, voce rende melhor em {bestOpening?.Name ?? "algumas linhas especificas"}. Eu priorizaria revisar {worstOpening?.Name ?? "as linhas que mais te punem"} com foco em planos tipicos, nao em decorar lances. {recentLine}";
+    }
+
+    if (normalized.Contains("pretas") || normalized.Contains("brancas") || normalized.Contains("cor"))
+    {
+        return $"Pela sua pergunta sobre cor: voce esta com {byColor.White.WinRate}% de score de brancas e {byColor.Black.WinRate}% de pretas. Eu manteria a base da cor mais forte e reduziria complexidade na cor mais fraca por algumas semanas para estabilizar resultado. {recentLine}";
+    }
+
+    if (normalized.Contains("final") || normalized.Contains("meio") || normalized.Contains("fase"))
+    {
+        return $"Boa pergunta sobre fase de jogo: hoje seu gargalo principal esta em {weakPhase}. Um ajuste que costuma funcionar rapido e treino curto diario com posicoes desse tema + revisao do primeiro lance que muda a partida. {recentLine}";
+    }
+
+    return $"Pelo seu historico recente ({sampleSize} partidas), eu atacaria primeiro os erros de {weakPhase}, com cuidado extra nas decisoes envolvendo {riskyPiece}. Continue explorando {successSummary.BestOpening?.Name ?? "as estruturas que mais te favorecem"} e acompanhe se a precisao media ({accuracy.OverallAverage?.ToString("0.0") ?? "-"}%) sobe nas proximas sessoes. {recentLine}";
 }
 
 static string BuildRuleBasedTip(
@@ -1496,7 +1996,7 @@ static string BuildRuleBasedTip(
         tips.Add("Seu perfil esta equilibrado; foque em consistencia de calculo e consolidacao de finais tecnicos para o proximo salto de nivel.");
     }
 
-    return string.Join(" ", tips.Take(3));
+    return $"Sem chave da IA ativa no momento, entao vou te responder de forma direta pelos dados: {string.Join(" ", tips.Take(3))}";
 }
 
 static ModeStatsDto? BuildModeStats(JsonElement? root, string mode)
@@ -1740,218 +2240,3 @@ static int? GetNestedInt(JsonElement element, params string[] path)
 
     return current.TryGetInt32(out var parsed) ? parsed : null;
 }
-
-enum GameOutcome
-{
-    Win,
-    Draw,
-    Loss
-}
-
-sealed record ParsedGame(
-    bool IsWhite,
-    GameOutcome Outcome,
-    string Opening,
-    string PlayerResultCode,
-    string? OpponentUsername,
-    string TimeClass,
-    string? TimeControl,
-    string? GameUrl,
-    int? PlayerRating,
-    int? OpponentRating,
-    double? PlayerAccuracy,
-    Dictionary<string, int> PlayerPieceMoves,
-    int PlyCount,
-    long EndTimeUnix);
-
-public sealed record PlayerQuickResponse(PlayerProfileDto Player, ProfileStatsSummaryDto ProfileStats);
-
-public sealed record PlayerDeepAnalysisResponse(
-    PlayerProfileDto Player,
-    ProfileStatsSummaryDto ProfileStats,
-    AccuracySummaryDto Accuracy,
-    ColorSplitDto ByColor,
-    OpeningSummaryDto Openings,
-    IReadOnlyList<PiecePressureDto> PiecePressure,
-    IReadOnlyList<PhasePressureDto> PhasePressure,
-    IReadOnlyList<PhasePerformanceDto> PhasePerformance,
-    SuccessSummaryDto SuccessSummary,
-    IReadOnlyList<RecentGameDto> RecentGames,
-    OverallScoreDto OverallScore,
-    IReadOnlyList<WeeklyTrendDto> WeeklyTrend,
-    IReadOnlyList<TimeClassStatsDto> TimeClassBreakdown,
-    OpponentRangeSummaryDto OpponentRanges,
-    IReadOnlyList<OpeningRecommendationDto> OpeningRecommendations,
-    SevenDayPlanDto TrainingPlan,
-    MonthComparisonDto MonthComparison,
-    ThemeTipsDto ThemedTips,
-    ConfidenceSummaryDto Confidence,
-    string AiTip,
-    int SampleSize,
-    string? TimeClassFilter,
-    int DataWindowMonths,
-    long GeneratedAtUnix);
-
-public sealed record PlayerProfileDto(
-    string Username,
-    string? Name,
-    string? Title,
-    string? CountryUrl,
-    string? Avatar,
-    string? Url,
-    int? Followers,
-    long? JoinedUnix,
-    long? LastOnlineUnix,
-    string? Status);
-
-public sealed record ProfileStatsSummaryDto(
-    int? RapidRating,
-    int? BlitzRating,
-    int? BulletRating,
-    ModeStatsDto? Rapid,
-    ModeStatsDto? Blitz,
-    ModeStatsDto? Bullet);
-
-public sealed record ModeStatsDto(
-    int? Rating,
-    int? Wins,
-    int? Losses,
-    int? Draws,
-    int? TotalGames,
-    double? WinRate);
-
-public sealed record ColorSplitDto(ColorStatsDto White, ColorStatsDto Black);
-
-public sealed record ColorStatsDto(int Wins, int Draws, int Losses, int TotalGames, double WinRate);
-
-public sealed record OpeningSummaryDto(IReadOnlyList<OpeningStatDto> Best, IReadOnlyList<OpeningStatDto> Worst);
-
-public sealed record OpeningStatDto(
-    string Name,
-    int Games,
-    int Wins,
-    int Draws,
-    int Losses,
-    double ScoreRate,
-    double LossRate,
-    double SufferingIndex);
-
-public sealed record PiecePressureDto(string Piece, int TotalMoves, int MovesInLosses, double RiskRate);
-
-public sealed record PhasePressureDto(string Phase, int Losses);
-
-public sealed record PhasePerformanceDto(string Phase, int Games, int Wins, int Draws, int Losses, double ScoreRate);
-
-public sealed record SuccessSummaryDto(
-    string BestColor,
-    OpeningStatDto? BestOpening,
-    PiecePressureDto? SafestPiece,
-    PhasePerformanceDto? StrongestPhase,
-    string? BestAccuracySide,
-    IReadOnlyList<string> Highlights);
-
-public sealed record RecentGameDto(
-    long PlayedAtUnix,
-    string Opponent,
-    string Color,
-    string Result,
-    string ResultCode,
-    string TimeClass,
-    string OpeningFamily,
-    string Opening,
-    double? Accuracy,
-    int FullMoves,
-    string? GameUrl);
-
-public sealed record AccuracySummaryDto(double? OverallAverage, double? WhiteAverage, double? BlackAverage, int GamesWithAccuracy);
-
-public sealed record OverallScoreDto(double Value, string Level, string Description);
-
-public sealed record WeeklyTrendDto(
-    long WeekStartUnix,
-    int Games,
-    int Wins,
-    int Draws,
-    int Losses,
-    double ScoreRate,
-    double? AverageAccuracy);
-
-public sealed record TimeClassStatsDto(
-    string TimeClass,
-    int Games,
-    int Wins,
-    int Draws,
-    int Losses,
-    double ScoreRate,
-    double? AverageAccuracy);
-
-public sealed record OpponentRangeSummaryDto(IReadOnlyList<OpponentRangeDto> Buckets);
-
-public sealed record OpponentRangeDto(
-    string Range,
-    int Games,
-    int Wins,
-    int Draws,
-    int Losses,
-    double ScoreRate);
-
-public sealed record OpeningRecommendationDto(
-    string OpeningFamily,
-    string Action,
-    string Reason,
-    string Confidence);
-
-public sealed record MonthComparisonDto(
-    MonthMetricsDto? Current,
-    MonthMetricsDto? Previous,
-    double? ScoreRateDelta,
-    double? AccuracyDelta,
-    int? GamesDelta);
-
-public sealed record MonthMetricsDto(
-    string Month,
-    int Games,
-    int Wins,
-    int Draws,
-    int Losses,
-    double ScoreRate,
-    double? AverageAccuracy);
-
-public sealed record ConfidenceSummaryDto(
-    string SampleLabel,
-    string OpeningsLabel,
-    string FilterLabel);
-
-public sealed record SevenDayPlanDto(
-    string TimeClassFocus,
-    double? BaselineAccuracy,
-    IReadOnlyList<PlanDayItemDto> Days);
-
-public sealed record PlanDayItemDto(string Day, string Focus, string Task);
-
-public sealed record ThemeTipsDto(
-    string Opening,
-    string Middlegame,
-    string Endgame,
-    string Decision);
-
-public sealed record GameOverviewDto(
-    long PlayedAtUnix,
-    string Opponent,
-    string Color,
-    string Result,
-    string ResultCode,
-    string TimeClass,
-    string? TimeControl,
-    string OpeningFamily,
-    string Opening,
-    double? Accuracy,
-    int FullMoves,
-    string? GameUrl);
-
-public sealed record GameAnalysisResponse(
-    GameOverviewDto Overview,
-    IReadOnlyList<string> Strengths,
-    IReadOnlyList<string> Mistakes,
-    IReadOnlyList<string> Improvements,
-    string AiComment);

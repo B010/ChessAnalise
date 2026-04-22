@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/Card'
 import { Button } from '../components/ui/Button'
+import { Input } from '../components/ui/Input'
 
 function pct(value) {
   return typeof value === 'number' ? `${value.toFixed(1)}%` : '-'
@@ -21,6 +22,59 @@ export function GameAnalysisPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [result, setResult] = useState(null)
+  const [chatMessages, setChatMessages] = useState([])
+  const [chatQuestion, setChatQuestion] = useState('')
+  const [chatLoading, setChatLoading] = useState(false)
+  const [chatError, setChatError] = useState('')
+
+  const chatStorageKey = useMemo(() => {
+    if (!nickname || !gameUrl) {
+      return ''
+    }
+
+    return `game-chat:${nickname}:${encodeURIComponent(gameUrl)}`
+  }, [nickname, gameUrl])
+
+  useEffect(() => {
+    if (!chatStorageKey) {
+      setChatMessages([])
+      return
+    }
+
+    try {
+      const raw = window.localStorage.getItem(chatStorageKey)
+      if (!raw) {
+        setChatMessages([])
+        return
+      }
+
+      const parsed = JSON.parse(raw)
+      if (!Array.isArray(parsed)) {
+        setChatMessages([])
+        return
+      }
+
+      const validMessages = parsed
+        .filter((item) => item && typeof item.content === 'string' && typeof item.role === 'string')
+        .map((item) => ({
+          role: item.role === 'assistant' ? 'assistant' : 'user',
+          content: item.content,
+          atUnix: typeof item.atUnix === 'number' ? item.atUnix : Math.floor(Date.now() / 1000),
+        }))
+
+      setChatMessages(validMessages)
+    } catch {
+      setChatMessages([])
+    }
+  }, [chatStorageKey])
+
+  useEffect(() => {
+    if (!chatStorageKey) {
+      return
+    }
+
+    window.localStorage.setItem(chatStorageKey, JSON.stringify(chatMessages))
+  }, [chatStorageKey, chatMessages])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -71,6 +125,66 @@ export function GameAnalysisPage() {
     const o = result.overview
     return `${o.result} vs ${o.opponent} (${o.timeClass})`
   }, [nickname, result])
+
+  async function askGameChat(questionText) {
+    const trimmedQuestion = questionText.trim()
+    if (!trimmedQuestion) {
+      setChatError('Digite uma pergunta para o chat.')
+      return
+    }
+
+    const userMessage = {
+      role: 'user',
+      content: trimmedQuestion,
+      atUnix: Math.floor(Date.now() / 1000),
+    }
+
+    const historyForRequest = chatMessages.slice(-20).map((item) => ({
+      role: item.role,
+      content: item.content,
+    }))
+
+    setChatError('')
+    setChatLoading(true)
+    setChatQuestion('')
+    setChatMessages((prev) => [...prev, userMessage])
+
+    try {
+      const response = await fetch(`/api/players/${encodeURIComponent(nickname)}/game-analysis/chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          gameUrl,
+          question: trimmedQuestion,
+          history: historyForRequest,
+        }),
+      })
+
+      const data = await response.json().catch(() => null)
+      if (!response.ok) {
+        throw new Error(data?.message || 'Nao foi possivel responder no chat agora.')
+      }
+
+      const assistantMessage = {
+        role: 'assistant',
+        content: data?.answer || 'Sem resposta no momento.',
+        atUnix: Math.floor(Date.now() / 1000),
+      }
+
+      setChatMessages((prev) => [...prev, assistantMessage])
+    } catch (requestError) {
+      setChatError(requestError.message || 'Erro inesperado no chat da partida.')
+    } finally {
+      setChatLoading(false)
+    }
+  }
+
+  function handleChatSubmit(event) {
+    event.preventDefault()
+    askGameChat(chatQuestion)
+  }
 
   return (
     <div className="app-shell">
@@ -194,6 +308,53 @@ export function GameAnalysisPage() {
                     Abrir partida no Chess.com
                   </a>
                 )}
+              </CardContent>
+            </Card>
+
+            <Card className="analysis-ai-card">
+              <CardHeader>
+                <CardTitle>Chat com IA da partida</CardTitle>
+                <CardDescription>Conversa continua com historico completo salvo por partida.</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="game-chat-history">
+                  {!chatMessages.length && (
+                    <p className="status-muted">Sem mensagens ainda. Pergunte algo sobre essa partida.</p>
+                  )}
+
+                  {chatMessages.map((message, index) => (
+                    <div
+                      key={`${message.role}-${message.atUnix}-${index}`}
+                      className={`game-chat-message ${message.role === 'assistant' ? 'is-assistant' : 'is-user'}`}
+                    >
+                      <strong>{message.role === 'assistant' ? 'Coach IA' : 'Voce'}</strong>
+                      <p>{message.content}</p>
+                    </div>
+                  ))}
+                </div>
+
+                <form className="game-chat-form" onSubmit={handleChatSubmit}>
+                  <Input
+                    value={chatQuestion}
+                    onChange={(event) => setChatQuestion(event.target.value)}
+                    placeholder="Ex: onde exatamente essa partida saiu do controle?"
+                    maxLength={700}
+                    disabled={chatLoading}
+                  />
+                  <Button type="submit" disabled={chatLoading}>
+                    {chatLoading ? 'Enviando...' : 'Enviar'}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    disabled={chatLoading || !chatMessages.length}
+                    onClick={() => setChatMessages([])}
+                  >
+                    Limpar historico
+                  </Button>
+                </form>
+
+                {chatError && <p className="status-error">{chatError}</p>}
               </CardContent>
             </Card>
           </section>

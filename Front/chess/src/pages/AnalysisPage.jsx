@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/Card'
 import { Button } from '../components/ui/Button'
+import { Input } from '../components/ui/Input'
 
 const TIME_OPTIONS = [
   { value: 'all', label: 'Todos' },
@@ -9,6 +10,13 @@ const TIME_OPTIONS = [
   { value: 'blitz', label: 'Blitz' },
   { value: 'bullet', label: 'Bullet' },
   { value: 'daily', label: 'Daily' },
+]
+
+const QUICK_AI_QUESTIONS = [
+  'Qual meu maior erro recorrente nas ultimas partidas?',
+  'Que plano pratico devo seguir na proxima semana para subir meu score?',
+  'Como ajustar meu repertorio de abertura com base nos meus ultimos jogos?',
+  'Qual checklist devo usar para reduzir blunders no meio-jogo?',
 ]
 
 function pct(value) {
@@ -57,6 +65,11 @@ export function AnalysisPage() {
   const [error, setError] = useState('')
   const [result, setResult] = useState(null)
   const [timeClass, setTimeClass] = useState('all')
+  const [aiQuestion, setAiQuestion] = useState('')
+  const [aiAnswer, setAiAnswer] = useState('')
+  const [aiAskedQuestion, setAiAskedQuestion] = useState('')
+  const [aiLoading, setAiLoading] = useState(false)
+  const [aiError, setAiError] = useState('')
 
   useEffect(() => {
     const controller = new AbortController()
@@ -104,6 +117,49 @@ export function AnalysisPage() {
 
   const profileUsername = result?.player?.username || nickname
   const monthComparison = result?.monthComparison
+
+  async function askAi(questionText) {
+    const trimmedQuestion = questionText.trim()
+    if (!trimmedQuestion) {
+      setAiError('Digite uma pergunta para a IA.')
+      return
+    }
+
+    setAiLoading(true)
+    setAiError('')
+
+    try {
+      const response = await fetch(`/api/players/${encodeURIComponent(profileUsername)}/analysis/ask`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          question: trimmedQuestion,
+          timeClass,
+        }),
+      })
+
+      const data = await response.json().catch(() => null)
+      if (!response.ok) {
+        throw new Error(data?.message || 'Nao foi possivel responder sua pergunta agora.')
+      }
+
+      setAiAskedQuestion(data?.question || trimmedQuestion)
+      setAiAnswer(data?.answer || 'Sem resposta no momento.')
+    } catch (requestError) {
+      setAiAnswer('')
+      setAiAskedQuestion('')
+      setAiError(requestError.message || 'Erro inesperado ao perguntar para IA.')
+    } finally {
+      setAiLoading(false)
+    }
+  }
+
+  function handleAskSubmit(event) {
+    event.preventDefault()
+    askAi(aiQuestion)
+  }
 
   return (
     <div className="app-shell">
@@ -455,6 +511,53 @@ export function AnalysisPage() {
                   ))}
                   {!result.recentGames?.length && <li>Sem jogos recentes suficientes.</li>}
                 </ul>
+              </CardContent>
+            </Card>
+
+            <Card className="analysis-ai-card">
+              <CardHeader>
+                <CardTitle>Pergunte para a IA</CardTitle>
+                <CardDescription>A resposta ja considera seus dados recentes e o filtro de ritmo atual.</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="ai-quick-questions">
+                  {QUICK_AI_QUESTIONS.map((question) => (
+                    <button
+                      key={question}
+                      type="button"
+                      className="filter-tab"
+                      onClick={() => {
+                        setAiQuestion(question)
+                        askAi(question)
+                      }}
+                      disabled={aiLoading}
+                    >
+                      {question}
+                    </button>
+                  ))}
+                </div>
+
+                <form className="ai-question-form" onSubmit={handleAskSubmit}>
+                  <Input
+                    value={aiQuestion}
+                    onChange={(event) => setAiQuestion(event.target.value)}
+                    placeholder="Ex: Como devo jogar a abertura quando estou de pretas no blitz?"
+                    maxLength={420}
+                    disabled={aiLoading}
+                  />
+                  <Button type="submit" disabled={aiLoading}>
+                    {aiLoading ? 'Respondendo...' : 'Perguntar'}
+                  </Button>
+                </form>
+
+                {aiError && <p className="status-error">{aiError}</p>}
+
+                {aiAnswer && (
+                  <div className="ai-answer-box">
+                    <strong>Pergunta: {aiAskedQuestion}</strong>
+                    <p>{aiAnswer}</p>
+                  </div>
+                )}
               </CardContent>
             </Card>
 

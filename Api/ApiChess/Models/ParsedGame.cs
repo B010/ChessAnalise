@@ -1,0 +1,16 @@
+sealed record ParsedGame(
+    bool IsWhite,
+    GameOutcome Outcome,
+    string Opening,
+    string PlayerResultCode,
+    string? OpponentUsername,
+    string TimeClass,
+    string? TimeControl,
+    string? GameUrl,
+    int? PlayerRating,
+    int? OpponentRating,
+    double? PlayerAccuracy,
+    Dictionary<string, int> PlayerPieceMoves,
+    IReadOnlyList<string> SanMoves,
+    int PlyCount,
+    long EndTimeUnix);
