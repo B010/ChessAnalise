@@ -64,6 +64,40 @@ npm run dev
 
 Front em desenvolvimento: `http://localhost:5173`
 
+## Variaveis de ambiente (frontend)
+
+O frontend usa `VITE_API_BASE_URL` para definir a base da API.
+
+- Em desenvolvimento local, voce pode deixar vazio para usar o proxy do Vite (`/api` -> `http://localhost:5267`).
+- Em producao (Vercel), configure com a URL publica da API no Azure.
+
+Exemplo:
+
+```bash
+VITE_API_BASE_URL=https://your-api-name.azurewebsites.net
+```
+
+Arquivo modelo: `.env.example`
+
+## Variaveis de ambiente (backend)
+
+A API le a chave da OpenAI pela configuracao `OpenAiKey`.
+
+- Local: configure no arquivo `Api/ApiChess/appsettings.Development.json`.
+- Azure App Service: adicione em Environment variables com o nome `OpenAiKey`.
+
+Exemplo:
+
+```bash
+OpenAiKey=sk-your-openai-key-here
+```
+
+Se quiser restringir CORS por dominio no Azure, use tambem:
+
+```bash
+FRONTEND_ORIGINS=https://seu-front.vercel.app
+```
+
 ## Scripts uteis (frontend)
 
 No `Front/chess`:
