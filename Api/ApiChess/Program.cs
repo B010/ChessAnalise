@@ -4,6 +4,7 @@ using System.Text.RegularExpressions;
 using Microsoft.Extensions.Caching.Memory;
 
 var builder = WebApplication.CreateBuilder(args);
+var configuredFrontOrigins = ParseConfiguredOrigins(builder.Configuration["FRONTEND_ORIGINS"]);
 
 builder.Services.AddOpenApi();
 builder.Services.AddMemoryCache();
@@ -19,16 +20,7 @@ builder.Services.AddCors(options =>
     options.AddPolicy("FrontDev", policy =>
     {
         policy
-            .SetIsOriginAllowed(origin =>
-            {
-                if (!Uri.TryCreate(origin, UriKind.Absolute, out var uri))
-                {
-                    return false;
-                }
-
-                return uri.Host.Equals("localhost", StringComparison.OrdinalIgnoreCase)
-                    || uri.Host.Equals("127.0.0.1", StringComparison.OrdinalIgnoreCase);
-            })
+            .SetIsOriginAllowed(origin => IsAllowedFrontOrigin(origin, configuredFrontOrigins))
             .AllowAnyHeader()
             .AllowAnyMethod();
     });
@@ -518,6 +510,43 @@ static string? NormalizeTimeClass(string? timeClass)
         "all" => null,
         _ => null
     };
+}
+
+static HashSet<string> ParseConfiguredOrigins(string? rawOrigins)
+{
+    if (string.IsNullOrWhiteSpace(rawOrigins))
+    {
+        return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    }
+
+    var origins = rawOrigins
+        .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        .Select(origin => origin.Trim().TrimEnd('/'))
+        .Where(origin => Uri.TryCreate(origin, UriKind.Absolute, out _));
+
+    return new HashSet<string>(origins, StringComparer.OrdinalIgnoreCase);
+}
+
+static bool IsAllowedFrontOrigin(string origin, HashSet<string> configuredOrigins)
+{
+    if (!Uri.TryCreate(origin, UriKind.Absolute, out var uri))
+    {
+        return false;
+    }
+
+    if (uri.Host.Equals("localhost", StringComparison.OrdinalIgnoreCase)
+        || uri.Host.Equals("127.0.0.1", StringComparison.OrdinalIgnoreCase))
+    {
+        return true;
+    }
+
+    var normalizedOrigin = $"{uri.Scheme}://{uri.Authority}";
+    if (configuredOrigins.Contains(normalizedOrigin))
+    {
+        return true;
+    }
+
+    return uri.Host.EndsWith(".vercel.app", StringComparison.OrdinalIgnoreCase);
 }
 
 static List<ParsedGame> FilterGamesByTimeClass(IEnumerable<ParsedGame> games, string? timeClass)

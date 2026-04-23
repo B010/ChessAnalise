@@ -74,7 +74,7 @@ O frontend usa `VITE_API_BASE_URL` para definir a base da API.
 Exemplo:
 
 ```bash
-VITE_API_BASE_URL=https://chessapi-h0bza8ftfcgvf9h2.canadacentral-01.azurewebsites.net
+VITE_API_BASE_URL=https://your-api-name.azurewebsites.net
 ```
 
 Arquivo modelo: `.env.example`
