@@ -8,6 +8,7 @@ var configuredFrontOrigins = ParseConfiguredOrigins(builder.Configuration["FRONT
 
 builder.Services.AddOpenApi();
 builder.Services.AddMemoryCache();
+builder.Services.AddStockfishIntegration(builder.Configuration);
 builder.Services.AddHttpClient("ChessCom", client =>
 {
     client.BaseAddress = new Uri("https://api.chess.com/pub/");
@@ -36,6 +37,7 @@ if (app.Environment.IsDevelopment())
 app.UseCors("FrontDev");
 app.UseHttpsRedirection();
 
+app.MapStockfishEndpoints();
 app.MapGet("/api/ping", () => Results.Ok("PONG")).WithName("Ping");
 
 app.MapGet("/api/players/{username}", async (string username, IHttpClientFactory httpClientFactory, CancellationToken cancellationToken) =>
