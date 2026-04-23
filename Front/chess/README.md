@@ -79,6 +79,25 @@ VITE_API_BASE_URL=https://your-api-name.azurewebsites.net
 
 Arquivo modelo: `.env.example`
 
+## Variaveis de ambiente (backend)
+
+A API le a chave da OpenAI pela configuracao `OpenAiKey`.
+
+- Local: configure no arquivo `Api/ApiChess/appsettings.Development.json`.
+- Azure App Service: adicione em Environment variables com o nome `OpenAiKey`.
+
+Exemplo:
+
+```bash
+OpenAiKey=sk-your-openai-key-here
+```
+
+Se quiser restringir CORS por dominio no Azure, use tambem:
+
+```bash
+FRONTEND_ORIGINS=https://seu-front.vercel.app
+```
+
 ## Scripts uteis (frontend)
 
 No `Front/chess`:
