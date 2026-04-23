@@ -14,7 +14,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("ApiChess")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+2b1abeea8ee1635252a82c571932ad74ad597736")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+90ab733198f95bd488deed6226509554442f1fd6")]
 [assembly: System.Reflection.AssemblyProductAttribute("ApiChess")]
 [assembly: System.Reflection.AssemblyTitleAttribute("ApiChess")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

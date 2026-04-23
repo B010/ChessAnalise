@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router-dom'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/Card'
 import { Button } from '../components/ui/Button'
 import { Input } from '../components/ui/Input'
+import { buildApiUrl } from '../lib/api'
 
 const TIME_OPTIONS = [
   { value: 'all', label: 'Todos' },
@@ -80,7 +81,7 @@ export function AnalysisPage() {
 
       try {
         const query = timeClass === 'all' ? '' : `?timeClass=${encodeURIComponent(timeClass)}`
-        const response = await fetch(`/api/players/${encodeURIComponent(nickname)}/analysis${query}`, {
+        const response = await fetch(buildApiUrl(`/api/players/${encodeURIComponent(nickname)}/analysis${query}`), {
           signal: controller.signal,
         })
 
@@ -129,7 +130,7 @@ export function AnalysisPage() {
     setAiError('')
 
     try {
-      const response = await fetch(`/api/players/${encodeURIComponent(profileUsername)}/analysis/ask`, {
+      const response = await fetch(buildApiUrl(`/api/players/${encodeURIComponent(profileUsername)}/analysis/ask`), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

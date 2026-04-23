@@ -3,6 +3,7 @@ import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/Card'
 import { Button } from '../components/ui/Button'
 import { Input } from '../components/ui/Input'
+import { buildApiUrl } from '../lib/api'
 
 function pct(value) {
   return typeof value === 'number' ? `${value.toFixed(1)}%` : '-'
@@ -91,7 +92,7 @@ export function GameAnalysisPage() {
 
       try {
         const response = await fetch(
-          `/api/players/${encodeURIComponent(nickname)}/game-analysis?gameUrl=${encodeURIComponent(gameUrl)}`,
+          buildApiUrl(`/api/players/${encodeURIComponent(nickname)}/game-analysis?gameUrl=${encodeURIComponent(gameUrl)}`),
           { signal: controller.signal },
         )
 
@@ -150,7 +151,7 @@ export function GameAnalysisPage() {
     setChatMessages((prev) => [...prev, userMessage])
 
     try {
-      const response = await fetch(`/api/players/${encodeURIComponent(nickname)}/game-analysis/chat`, {
+      const response = await fetch(buildApiUrl(`/api/players/${encodeURIComponent(nickname)}/game-analysis/chat`), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

@@ -64,6 +64,21 @@ npm run dev
 
 Front em desenvolvimento: `http://localhost:5173`
 
+## Variaveis de ambiente (frontend)
+
+O frontend usa `VITE_API_BASE_URL` para definir a base da API.
+
+- Em desenvolvimento local, voce pode deixar vazio para usar o proxy do Vite (`/api` -> `http://localhost:5267`).
+- Em producao (Vercel), configure com a URL publica da API no Azure.
+
+Exemplo:
+
+```bash
+VITE_API_BASE_URL=https://chessapi-h0bza8ftfcgvf9h2.canadacentral-01.azurewebsites.net
+```
+
+Arquivo modelo: `.env.example`
+
 ## Scripts uteis (frontend)
 
 No `Front/chess`:

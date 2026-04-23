@@ -44,6 +44,8 @@ if (app.Environment.IsDevelopment())
 app.UseCors("FrontDev");
 app.UseHttpsRedirection();
 
+app.MapGet("/api/ping", () => Results.Ok("PONG")).WithName("Ping");
+
 app.MapGet("/api/players/{username}", async (string username, IHttpClientFactory httpClientFactory, CancellationToken cancellationToken) =>
 {
     try

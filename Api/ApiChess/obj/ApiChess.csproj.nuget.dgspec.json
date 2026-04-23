@@ -1,17 +1,17 @@
 {
   "format": 1,
   "restore": {
-    "d:\\projetos\\ChessAnalise\\Api\\ApiChess\\ApiChess.csproj": {}
+    "D:\\projetos\\ChessAnalise\\Api\\ApiChess\\ApiChess.csproj": {}
   },
   "projects": {
-    "d:\\projetos\\ChessAnalise\\Api\\ApiChess\\ApiChess.csproj": {
+    "D:\\projetos\\ChessAnalise\\Api\\ApiChess\\ApiChess.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "d:\\projetos\\ChessAnalise\\Api\\ApiChess\\ApiChess.csproj",
+        "projectUniqueName": "D:\\projetos\\ChessAnalise\\Api\\ApiChess\\ApiChess.csproj",
         "projectName": "ApiChess",
-        "projectPath": "d:\\projetos\\ChessAnalise\\Api\\ApiChess\\ApiChess.csproj",
+        "projectPath": "D:\\projetos\\ChessAnalise\\Api\\ApiChess\\ApiChess.csproj",
         "packagesPath": "C:\\Users\\Buggy\\.nuget\\packages\\",
-        "outputPath": "d:\\projetos\\ChessAnalise\\Api\\ApiChess\\obj\\",
+        "outputPath": "D:\\projetos\\ChessAnalise\\Api\\ApiChess\\obj\\",
         "projectStyle": "PackageReference",
         "configFilePaths": [
           "C:\\Users\\Buggy\\AppData\\Roaming\\NuGet\\NuGet.Config"
