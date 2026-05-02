@@ -3,4 +3,5 @@ public sealed record GameAnalysisResponse(
     IReadOnlyList<string> Strengths,
     IReadOnlyList<string> Mistakes,
     IReadOnlyList<string> Improvements,
-    string AiComment);
+    string AiComment,
+    IReadOnlyList<string> SanMoves);

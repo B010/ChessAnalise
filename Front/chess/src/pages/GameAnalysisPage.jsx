@@ -4,6 +4,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../co
 import { Button } from '../components/ui/Button'
 import { Input } from '../components/ui/Input'
 import { buildApiUrl } from '../lib/api'
+import ChessBoard from '../components/Chess/ChessBoard'
 
 function pct(value) {
   return typeof value === 'number' ? `${value.toFixed(1)}%` : '-'
@@ -210,6 +211,22 @@ export function GameAnalysisPage() {
 
         {result && !loading && (
           <section className="analysis-grid">
+            <Card>
+              <CardHeader>
+                <CardTitle>Tabuleiro</CardTitle>
+                <CardDescription>Veja e navegue pelos lances desta partida.</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <ChessBoard
+                  key={`${result.overview?.color || 'white'}-${(result.sanMoves || []).join('|')}`}
+                  sanMoves={result.sanMoves || []}
+                  orientation={result.overview?.color === 'Pretas' ? 'black' : 'white'}
+                  compact
+                />
+              </CardContent>
+            </Card>
+
+            
             <Card>
               <CardHeader>
                 <CardTitle>Resumo da partida</CardTitle>

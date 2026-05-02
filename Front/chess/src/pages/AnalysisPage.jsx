@@ -201,6 +201,7 @@ export function AnalysisPage() {
 
         {result && !loading && (
           <section className="analysis-grid">
+            
             <Card>
               <CardHeader>
                 <CardTitle>Resumo de rating</CardTitle>

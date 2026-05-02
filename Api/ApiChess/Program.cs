@@ -385,7 +385,8 @@ app.MapGet("/api/players/{username}/game-analysis", async (
             Strengths: strengths,
             Mistakes: mistakes,
             Improvements: improvements,
-            AiComment: aiComment));
+            AiComment: aiComment,
+            SanMoves: target.SanMoves));
     }
     catch (OperationCanceledException)
     {

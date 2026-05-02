@@ -2,6 +2,15 @@
   "version": 3,
   "targets": {
     "net9.0": {
+      "Chess/1.0.1": {
+        "type": "package",
+        "compile": {
+          "lib/net40/Microsoft.Concurrency.UnitTestingFramework.dll": {}
+        },
+        "runtime": {
+          "lib/net40/Microsoft.Concurrency.UnitTestingFramework.dll": {}
+        }
+      },
       "Microsoft.AspNetCore.OpenApi/9.0.7": {
         "type": "package",
         "dependencies": {
@@ -37,6 +46,39 @@
     }
   },
   "libraries": {
+    "Chess/1.0.1": {
+      "sha512": "9SaaJE7g/pm4SHUr6WjNtKDrKgoEOS+aVAyV7+ComTJ1/eVBaCESLHE+rASFEISZ+6kba2mev20lgagZDQL+EQ==",
+      "type": "package",
+      "path": "chess/1.0.1",
+      "hasTools": true,
+      "files": [
+        ".nupkg.metadata",
+        ".signature.p7s",
+        "chess.1.0.1.nupkg.sha512",
+        "chess.nuspec",
+        "lib/net40/Microsoft.Concurrency.UnitTestingFramework.dll",
+        "tools/Chess.dll",
+        "tools/Microsoft.Concurrency.Taskometer.dll",
+        "tools/Microsoft.Concurrency.UnitTesting.Execution.dll",
+        "tools/Microsoft.Concurrency.UnitTesting.Extensions.dll",
+        "tools/Microsoft.Concurrency.UnitTestingFramework.dll",
+        "tools/Microsoft.ExtendedReflection.ClrMonitor.X86.dll",
+        "tools/Microsoft.ExtendedReflection.dll",
+        "tools/Microsoft.ManagedChess.Base.exe",
+        "tools/Microsoft.ManagedChess.Engine.dll",
+        "tools/Microsoft.ManagedChess.Framework35Wrappers.dll",
+        "tools/Microsoft.ManagedChess.Framework4Wrappers.dll",
+        "tools/Microsoft.ManagedChess.Launcher.dll",
+        "tools/Microsoft.ManagedChess.MChess.dll",
+        "tools/Microsoft.ManagedChess.ThreadingWrappers.dll",
+        "tools/Microsoft.ManagedChessAPI.dll",
+        "tools/Scenario.Managed.dll",
+        "tools/mchess.exe",
+        "tools/mchess.exe.config",
+        "tools/mcut.exe",
+        "tools/regClrMonitor.bat"
+      ]
+    },
     "Microsoft.AspNetCore.OpenApi/9.0.7": {
       "sha512": "8aG0mkgmA38IDJ0ca5HIpdexKjHXIh0z1kIdw5WyM6CrD4+CEt97UgSwBBBCHG6QQKV0hj2mfkwtEcqrJBcu8g==",
       "type": "package",
@@ -71,6 +113,7 @@
   },
   "projectFileDependencyGroups": {
     "net9.0": [
+      "Chess >= 1.0.1",
       "Microsoft.AspNetCore.OpenApi >= 9.0.7"
     ]
   },
@@ -80,11 +123,11 @@
   "project": {
     "version": "1.0.0",
     "restore": {
-      "projectUniqueName": "D:\\projetos\\ChessAnalise\\Api\\ApiChess\\ApiChess.csproj",
+      "projectUniqueName": "d:\\projetos\\ChessAnalise\\Api\\ApiChess\\ApiChess.csproj",
       "projectName": "ApiChess",
-      "projectPath": "D:\\projetos\\ChessAnalise\\Api\\ApiChess\\ApiChess.csproj",
+      "projectPath": "d:\\projetos\\ChessAnalise\\Api\\ApiChess\\ApiChess.csproj",
       "packagesPath": "C:\\Users\\Buggy\\.nuget\\packages\\",
-      "outputPath": "D:\\projetos\\ChessAnalise\\Api\\ApiChess\\obj\\",
+      "outputPath": "d:\\projetos\\ChessAnalise\\Api\\ApiChess\\obj\\",
       "projectStyle": "PackageReference",
       "configFilePaths": [
         "C:\\Users\\Buggy\\AppData\\Roaming\\NuGet\\NuGet.Config"
@@ -117,6 +160,10 @@
       "net9.0": {
         "targetAlias": "net9.0",
         "dependencies": {
+          "Chess": {
+            "target": "Package",
+            "version": "[1.0.1, )"
+          },
           "Microsoft.AspNetCore.OpenApi": {
             "target": "Package",
             "version": "[9.0.7, )"
@@ -144,5 +191,17 @@
         "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\9.0.303/PortableRuntimeIdentifierGraph.json"
       }
     }
-  }
+  },
+  "logs": [
+    {
+      "code": "NU1701",
+      "level": "Warning",
+      "warningLevel": 1,
+      "message": "Package 'Chess 1.0.1' was restored using '.NETFramework,Version=v4.6.1, .NETFramework,Version=v4.6.2, .NETFramework,Version=v4.7, .NETFramework,Version=v4.7.1, .NETFramework,Version=v4.7.2, .NETFramework,Version=v4.8, .NETFramework,Version=v4.8.1' instead of the project target framework 'net9.0'. This package may not be fully compatible with your project.",
+      "libraryId": "Chess",
+      "targetGraphs": [
+        "net9.0"
+      ]
+    }
+  ]
 }
